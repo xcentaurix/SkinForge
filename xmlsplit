@@ -1,0 +1,9 @@
+#!/bin/bash
+src=$1
+
+if [ -z $1 ]; then
+	echo "$0 <input file"
+else
+	echo spliting $src
+	python "$(dirname "$0")"/src/xmlsplit.py -i $src
+fi

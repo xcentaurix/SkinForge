@@ -1,0 +1,15 @@
+#!/bin/bash
+scale=$1
+src=$2
+dst=$3
+
+if [ -z $dst ]; then
+	dst=$src
+fi
+
+if [ -z $1 ] || [ -z $2 ]; then
+	echo "$0 <scaling factor> <source file> <destination file>"
+else
+	echo scaling xml from $src to $dst, scaling factor: $scale
+	python "$(dirname "$0")"/src/xmlscale.py -s $scale -i $src -o $dst
+fi

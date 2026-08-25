@@ -1,0 +1,11 @@
+#!/bin/bash
+src="$1"
+dst="$2"
+if [ -z "$src" ]; then
+	src="$(pwd)"
+fi
+if [ -z "$dst" ]; then
+	dst=$src
+fi
+echo xmlpretty $src $dst
+python "$(dirname "$0")"/src/xmlpretty.py -i $src -o $dst
