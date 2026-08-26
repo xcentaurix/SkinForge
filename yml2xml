@@ -1,0 +1,10 @@
+#!/bin/bash
+src=$1
+dst=$2
+
+if [ -z "$1" ] || [ -z "$2" ]; then
+	echo "$0 <source file> <destination file>"
+else
+	echo converting $src to $dst
+	python "$(dirname "$0")"/src/yml2xml.py -i $src -o $dst
+fi

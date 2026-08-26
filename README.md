@@ -1,4 +1,4 @@
-# SkinForge - An Enigma2 Skin Compiler & a step towards hierarchical skin design
+# SkinForge - An Enigma2 Skin Compiler & A step towards hierarchical skin design
 
 ## Introduction
 An enigma2 skin is natively just a flat XML file: no includes, no macros, no relative positioning, no variables, no reuse. If you maintain more than one plugin and want a consistent look — or want to change a button style in one place instead of in every `skin.xml` that copy-pasted it — you're stuck hand-editing pixel coordinates in N files at once.
@@ -56,6 +56,48 @@ xmlinc <source-file> <destination-file> <destination-dir> <common-dir>
 
 Run it as a build step before packaging a plugin — the checked-in skin source stays hierarchical and reusable; the file enigma2 actually loads at runtime is the compiled, flat output.
 
+## Authoring in YAML (experimental)
+
+Skin sources can optionally be written as YAML instead of XML — a `skin.yml` (a full document) or a `*.ymlinc` (an include fragment, the YAML equivalent of `.xmlinc`) — and converted to and from plain XML. This is new and still evolving; XML via `xmlinc` remains the primary, supported way to author skins.
+
+### Usage
+
+```
+yml2xml <source .yml/.ymlinc file> <destination .xml/.xmlinc file>   # YAML -> XML, feed the result to xmlinc
+xml2yml <source .xml/.xmlinc file> <destination .yml/.ymlinc file>   # XML -> YAML, the reverse
+```
+
+### Mapping
+
+- An element `<tag attr="val">...children...</tag>` becomes `{tag: {attr: "val", ..., children: [...]}}`.
+- A standalone `<!-- comment -->` before a child element becomes a standalone `# comment` right before the matching list item (and back).
+
+### The `<convert>` template special case
+
+A `<convert type="...">` block holding a `TemplatedMultiContent`/`TemplatedMultiContentEx` template is a Python dict literal, not markup, so it gets its own structured form instead of a blob of Python source text:
+
+```yaml
+template:
+  - call: MultiContentEntryText
+    kwargs:
+      pos: [5, 5]
+      size: [55, 25]
+      flags: RT_HALIGN_LEFT | RT_VALIGN_CENTER
+      text: 0
+```
+
+- **Every entry factory is covered the same generic way** — `Text`, `Pixmap`, `PixmapAlphaTest`, `PixmapAlphaBlend`, `Progress`, `ProgressPixmap`, `Rectangle`, `LinearGradient`, `LinearGradientAlphaBlend` (the complete list in `Components/MultiContent.py`) — the `call` name is just emitted as-is, so nothing needs updating here if a new one is ever added.
+- **`MultiContentTemplateColor(n)` nests inside a color-ish kwarg**: `color: {call: MultiContentTemplateColor, args: [24]}`.
+- **`TemplatedMultiContentEx`'s `e`/`c` grid variables work in `pos=`/`size=` arithmetic**: `pos: [e - 350, 15]`.
+- **Kwarg values are quoted strings by default** (real Python string literals) — *except* `flags`, `call`, and `direction`, the three keys that hold code (`RT_*`/`BT_*`/`GRADIENT_*` constants, a callable name) rather than data. This is decided by key name, not by how the value was written: YAML's own parser can't tell a quoted string from a bare one apart once parsed, so quoting style alone can't carry the distinction through a round trip.
+
+See `TVMagazineCockpit/src/skin/default/skin.yml` / `screenpart_EventCell.ymlinc` and `MovieCockpit/src/skin/default/skin.xml`'s `TemplatedMultiContentEx` block for worked examples.
+
+### Implementation notes
+
+- `yml2xml` hand-rolls a parser for the specific subset of YAML this dialect uses (block mappings/sequences, flow lists, quoted/bare scalars, `|` block scalars, standalone comments) rather than using a full YAML implementation — deliberately, to avoid a third-party dependency that may not be installed in the box's Python.
+- `xml2yml` hand-rolls its XML-reading side for the same reason, but parses the Python dict literal inside a `<convert>` block with the standard-library `ast` module instead of hand-rolling a Python-expression parser — that content really is Python source, and `ast` (part of the interpreter itself, not a pip package) is the right tool for it. Requires Python 3.9+ (`ast.unparse`).
+
 ## Other tools
 
 Everything below operates on already-flat XML (or SVG) and doesn't involve the `xmlinc` include/variable/formula language.
@@ -81,6 +123,3 @@ This project is work in progress.
 
 ## Limitations
 - Tested on OpenViX and OpenATV with DM900.
-
-## Links
-- Installation: https://xcentaurix.github.io/SkinForge
