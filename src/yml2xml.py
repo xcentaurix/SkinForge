@@ -18,16 +18,22 @@
 #   - {tag: {..., text: "..."}} becomes <tag ...>text</tag>.
 #   - a comment on a sequence item is emitted as <!-- comment --> immediately
 #     before that item.
-#   - SPECIAL CASE: a "convert" node holding template/fonts/itemHeight/
-#     selectionEnabled/scrollbarMode/itemWidth/orientation (rather than plain
-#     text/children) is a TemplatedMultiContent(Ex) template. Its entries are
-#     {call: Name, args: [...]} and/or {call: Name, kwargs: {...}} mappings,
-#     each rendered back to "Name(*args, **kwargs)" Python source, and the
-#     whole thing reassembled into the {"template": [...], "fonts": [...],
-#     ...} dict literal a <convert type="...">...</convert> block needs as
-#     its text content.
-#   - a plain <convert type="X">text</convert> (no template keys) is just an
-#     ordinary text-content element and goes through the normal path.
+#   - SPECIAL CASE: a "convert" node holding a "cell" key (rather than plain
+#     text/children) is a TemplatedMultiContent(Ex) template in the domain-
+#     level schema documented in SkinForge/README.md and xml2yml.py's module
+#     docstring - fromDomainCell() expands its text/icon/progress/raw fields
+#     back into the {template, fonts, itemHeight, ...} shape described next,
+#     which renderConvertTemplate()/pyCall() below turn into the actual
+#     Python dict literal a <convert type="...">...</convert> block needs as
+#     its text content. A "convert" node holding template/fonts/itemHeight/
+#     selectionEnabled/scrollbarMode/itemWidth/orientation directly (the
+#     older, low-level form - still what a "raw" domain field's own call/
+#     kwargs use) is accepted the same way, without a "cell" wrapper.
+#     Entries are {call: Name, args: [...]} and/or {call: Name, kwargs: {...}}
+#     mappings, each rendered back to "Name(*args, **kwargs)" Python source.
+#   - a plain <convert type="X">text</convert> (no "cell" or template keys)
+#     is just an ordinary text-content element and goes through the normal
+#     path.
 #
 # Scalar typing: a quoted YAML string ("...") and a plain/bare one both parse
 # to a Python str - YAML discards the distinction, so it can't be used to
@@ -52,15 +58,19 @@
 
 
 import argparse
+import re
 import sys
 from FileUtils import readFile, writeFile
 from Version import VERSION
 
 
-TEMPLATE_KEYS = ("template", "fonts", "itemHeight", "selectionEnabled",
-                  "scrollbarMode", "itemWidth", "orientation")
+TEMPLATE_KEYS = (
+    "template", "fonts", "itemHeight", "selectionEnabled",
+    "scrollbarMode", "itemWidth", "orientation",
+)
 RAW_KWARG_KEYS = {"call", "flags", "direction"}
 INDENT = "\t"
+BARE_VAR_RE = re.compile(r"^\$\w+$")
 
 
 class Commented:
@@ -115,7 +125,7 @@ class YamlParser():
             e = self.peek()
             if e is None or e[0] != indent:
                 break
-            eindent, content, is_comment = e
+            _, content, is_comment = e
             if is_comment:
                 pending_comment = content
                 self.pos += 1
@@ -152,7 +162,7 @@ class YamlParser():
             e = self.peek()
             if e is None or e[0] != indent:
                 break
-            eindent, content, is_comment = e
+            _, content, is_comment = e
             if is_comment:
                 self.pos += 1  # standalone comments before/between keys aren't tracked
                 continue
@@ -248,8 +258,26 @@ def xmlEscape(value):
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
+def wrapEval(value):
+    """Inverse of xml2yml.py's stripEval(): re-wrap a formula segment in
+    eval(...) for xmlinc to evaluate at compile time. Splits on "," since
+    every real eval() usage in this codebase wraps exactly one comma-segment
+    of a position/size pair (e.g. "0,eval($screen_height-48)"), never a
+    partial segment. A segment is wrapped only if it references a $var AND
+    is more than just that bare reference - a plain "$FR_big" (substitution,
+    no eval needed) and TemplatedMultiContentEx's "e"/"c" grid math (no $ at
+    all, evaluated separately inside <convert> blocks) both pass through
+    untouched."""
+    if not isinstance(value, str) or "$" not in value:
+        return value
+    segments = value.split(",")
+    wrapped = [seg if BARE_VAR_RE.match(seg.strip()) or "$" not in seg else f"eval({seg})"
+               for seg in segments]
+    return ",".join(wrapped)
+
+
 def renderAttrs(attrs):
-    return "".join(f' {k}="{xmlEscape(v)}"' for k, v in attrs.items())
+    return "".join(f' {k}="{xmlEscape(wrapEval(v))}"' for k, v in attrs.items())
 
 
 def pyVal(value, raw=False):
@@ -299,14 +327,114 @@ def renderConvertTemplate(body):
     return "{" + ",\n".join(pairs) + "}"
 
 
+# ---------------------------------------------------------------------------
+# Domain-level "cell" schema (the inverse of xml2yml.py's toDomainCell()) -
+# see that file's module docstring for the schema itself. Reconstructs the
+# same {template, fonts, itemHeight, ...} intermediate shape renderConvert
+# Template()/pyCall() above already know how to turn into Python source, so
+# nothing downstream of fromDomainCell() needs to change for this schema.
+# ---------------------------------------------------------------------------
+
+def unwrapField(item):
+    (kind, field), = unwrap(item).items()
+    return kind, field
+
+
+def rectToPosSize(rect):
+    return [rect[0], rect[1]], [rect[2], rect[3]]
+
+
+def internFonts(cell):
+    """Collects the distinct font strings used (border's font, then each
+    text field's, in order), assigning each a stable first-use index -
+    unused fonts from the original source (never referenced by any field)
+    are dropped, since domain form has no slot to remember a declared-but-
+    unused font and it can't affect rendering either way."""
+    order = []
+    index = {}
+
+    def register(font_str):
+        if font_str not in index:
+            index[font_str] = len(order)
+            order.append(font_str)
+        return index[font_str]
+
+    if "border" in cell and "font" in cell["border"]:
+        register(cell["border"]["font"])
+    for item in cell.get("fields", []):
+        kind, field = unwrapField(item)
+        if kind == "text" and "font" in field:
+            register(field["font"])
+
+    fonts = []
+    for font_str in order:
+        family, size = font_str.split(";")
+        fonts.append({"call": "gFont", "args": [family, int(size)]})
+    return fonts, index
+
+
+def fromDomainField(kind, field, font_index):
+    if kind == "raw":
+        return field  # untouched {call, args?, kwargs?}
+
+    pos, size = rectToPosSize(field["rect"])
+
+    if kind == "text":
+        kwargs = {"pos": pos, "size": size, "font": font_index[field["font"]],
+                  "flags": field["flags"], "text": field["value"]}
+        for k in ("color", "color_sel"):
+            if k in field:
+                kwargs[k] = field[k]
+        return {"call": "MultiContentEntryText", "kwargs": kwargs}
+
+    if kind == "icon":
+        return {"call": "MultiContentEntryPixmapAlphaBlend",
+                "kwargs": {"pos": pos, "size": size, "png": field["value"], "flags": field["flags"]}}
+
+    if kind == "progress":
+        kwargs = {"pos": pos, "size": size, "percent": field["value"]}
+        for k in ("borderWidth", "foreColor", "foreColorSelected", "backColor"):
+            if k in field:
+                kwargs[k] = field[k]
+        return {"call": "MultiContentEntryProgress", "kwargs": kwargs}
+
+    raise ValueError(f"unknown domain field kind: {kind}")
+
+
+def fromDomainCell(cell):
+    fonts, font_index = internFonts(cell)
+
+    template = []
+    if "border" in cell:
+        b = cell["border"]
+        template.append({"call": "MultiContentEntryText", "kwargs": {
+            "pos": [0, 0], "size": [cell.get("width", 0), cell.get("itemHeight", 0)],
+            "font": font_index[b["font"]], "flags": b["flags"], "text": "",
+            "border_width": b["width"], "border_color": b["color"],
+        }})
+
+    for item in cell.get("fields", []):
+        kind, field = unwrapField(item)
+        template.append(fromDomainField(kind, field, font_index))
+
+    body = {"template": template}
+    if fonts:
+        body["fonts"] = fonts
+    for key in ("itemHeight", "itemWidth", "selectionEnabled", "scrollbarMode", "orientation"):
+        if key in cell:
+            body[key] = cell[key]
+    return body
+
+
 def renderNode(tag, body, level, lines):
     body = body or {}
     prefix = INDENT * level
 
-    if tag == "convert" and any(k in body for k in TEMPLATE_KEYS):
+    if tag == "convert" and ("cell" in body or any(k in body for k in TEMPLATE_KEYS)):
         attr_str = renderAttrs({"type": body.get("type", "")})
         lines.append(f"{prefix}<convert{attr_str}>")
-        for line in renderConvertTemplate(body).split("\n"):
+        template_body = fromDomainCell(body["cell"]) if "cell" in body else body
+        for line in renderConvertTemplate(template_body).split("\n"):
             lines.append(f"{prefix}{INDENT}{line}" if line else "")
         lines.append(f"{prefix}</convert>")
         return
@@ -332,7 +460,9 @@ def renderNode(tag, body, level, lines):
 
 def yml2xml(text, is_full_document):
     root = YamlParser(text).parseDocument()
-    (tag, body), = root.items()
+    root_items = list(root.items())
+    assert len(root_items) == 1, "document root must have exactly one top-level key"
+    tag, body = root_items[0]
     lines = []
     if is_full_document:
         lines.append('<?xml version="1.0" encoding="UTF-8"?>')

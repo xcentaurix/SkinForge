@@ -25,6 +25,19 @@
 # elements (a container) or only text (a leaf), never both - true of every
 # real skin.xml in this codebase, and the same assumption yml2xml.py's
 # renderer makes on the way back.
+#
+# xmlinc's eval(formula) wrapper (e.g. position="0,eval($screen_height-48)")
+# is compile-time plumbing, not part of the formula, so attribute values are
+# unwrapped to just the formula on the way into YAML (see stripEval()).
+# yml2xml.py's wrapEval() puts eval(...) back on the way to XML, using a
+# heuristic since the YAML no longer carries an explicit marker for it.
+#
+# A <convert> block's template isn't rendered as a raw mirror of the Python
+# call syntax - see toDomainCell()/parseConvertTemplate() below and
+# SkinForge/README.md for the domain-level "cell"/"fields" schema this
+# produces, hiding MultiContentEntry*/RT_*/font-index plumbing for the shapes
+# actually seen in this codebase (falls back to a lossless "raw" field, same
+# shape as before, for anything that doesn't match one of those shapes).
 
 
 import argparse
@@ -34,8 +47,10 @@ from FileUtils import readFile, writeFile
 from Version import VERSION
 
 
-TEMPLATE_KEYS = ("template", "fonts", "itemHeight", "selectionEnabled",
-                  "scrollbarMode", "itemWidth", "orientation")
+TEMPLATE_KEYS = (
+    "template", "fonts", "itemHeight", "selectionEnabled",
+    "scrollbarMode", "itemWidth", "orientation",
+)
 INDENT = "  "
 
 
@@ -201,8 +216,146 @@ def parseConvertTemplate(text):
 
 
 # ---------------------------------------------------------------------------
+# Domain-level cell schema: hides MultiContentEntry*/RT_*/font-index plumbing
+# for the shapes actually seen in this codebase (see SkinForge/README.md).
+# Anything that doesn't match one of these exact shapes falls back to a "raw"
+# field carrying the untouched {call, args?, kwargs?} - never lossy, just not
+# upgraded. Resolving a tuple-index (value: 0) to a semantic name (startHM)
+# is explicitly out of scope: that needs a per-plugin mapping (e.g.
+# TVMagazineCockpit/Index.py's `idx` dict) this tool has no way to discover.
+# ---------------------------------------------------------------------------
+
+TEXT_REQUIRED_KWARGS = {"pos", "size", "font", "flags", "text"}
+TEXT_ALLOWED_KWARGS = TEXT_REQUIRED_KWARGS | {"color", "color_sel"}
+ICON_REQUIRED_KWARGS = {"pos", "size", "png", "flags"}
+PROGRESS_REQUIRED_KWARGS = {"pos", "size", "percent"}
+PROGRESS_ALLOWED_KWARGS = PROGRESS_REQUIRED_KWARGS | {
+    "borderWidth", "foreColor", "foreColorSelected", "backColor"}
+BORDER_TEXT_KWARGS = {"pos", "size", "font", "flags", "text", "border_width", "border_color"}
+
+
+def resolveFontIndex(fonts, index):
+    family, size = fonts[index]["args"]
+    return f"{family};{size}"
+
+
+def mergeRect(kwargs):
+    pos, size = kwargs["pos"], kwargs["size"]
+    return [pos[0], pos[1], size[0], size[1]]
+
+
+def toDomainField(entry, fonts):
+    """Returns (kind, field) for one template entry - kind is text/icon/
+    progress when the call matches one of those exact known shapes, else
+    "raw" (field is then the original {call, args?, kwargs?} untouched)."""
+    call = entry["call"]
+    kwargs = entry.get("kwargs", {})
+    keys = set(kwargs.keys())
+    has_args = "args" in entry
+
+    if (not has_args and call == "MultiContentEntryText"
+            and TEXT_REQUIRED_KWARGS <= keys <= TEXT_ALLOWED_KWARGS):
+        field = {
+            "rect": mergeRect(kwargs), "font": resolveFontIndex(fonts, kwargs["font"]),
+            "flags": kwargs["flags"], "value": kwargs["text"],
+        }
+        for k in ("color", "color_sel"):
+            if k in kwargs:
+                field[k] = kwargs[k]
+        return "text", field
+
+    if (not has_args and call == "MultiContentEntryPixmapAlphaBlend"
+            and keys == ICON_REQUIRED_KWARGS):
+        return "icon", {"rect": mergeRect(kwargs), "flags": kwargs["flags"], "value": kwargs["png"]}
+
+    if (not has_args and call == "MultiContentEntryProgress"
+            and PROGRESS_REQUIRED_KWARGS <= keys <= PROGRESS_ALLOWED_KWARGS):
+        field = {"rect": mergeRect(kwargs), "value": kwargs["percent"]}
+        for k in ("borderWidth", "foreColor", "foreColorSelected", "backColor"):
+            if k in kwargs:
+                field[k] = kwargs[k]
+        return "progress", field
+
+    return "raw", entry
+
+
+def detectBorder(entries, fonts):
+    """If entries[0] is the empty-text border-box trick (a full MultiContent
+    Text entry whose only purpose is drawing a border, since text=""  never
+    renders anything), pulls it out as (border_dict, width, remaining). Match
+    must be exact - anything that deviates stays a normal field instead of
+    being force-fit, so this can never lose information."""
+    if not entries:
+        return None, None, entries
+    first = entries[0]
+    kwargs = first.get("kwargs", {})
+    if (first["call"] != "MultiContentEntryText" or "args" in first
+            or set(kwargs.keys()) != BORDER_TEXT_KWARGS
+            or kwargs.get("text") != ""
+            or list(kwargs.get("pos", [])) != [0, 0]):
+        return None, None, entries
+    border = {
+        "width": kwargs["border_width"],
+        "color": kwargs["border_color"],
+        "font": resolveFontIndex(fonts, kwargs["font"]),
+        "flags": kwargs["flags"],
+    }
+    return border, kwargs["size"][0], entries[1:]
+
+
+def toDomainCell(body):
+    fonts = body.get("fonts", [])
+    entries = body["template"]
+
+    cell = {}
+    if "itemHeight" in body:
+        cell["itemHeight"] = body["itemHeight"]
+    for key in ("itemWidth", "selectionEnabled", "scrollbarMode", "orientation"):
+        if key in body:
+            cell[key] = body[key]
+
+    border, width, entries = detectBorder(entries, fonts)
+    if border is not None:
+        cell["width"] = width
+        cell["border"] = border
+
+    cell["fields"] = [
+        {kind: field} for kind, field in (toDomainField(entry, fonts) for entry in entries)
+    ]
+    return cell
+
+
+# ---------------------------------------------------------------------------
 # YAML rendering
 # ---------------------------------------------------------------------------
+
+def stripEval(value):
+    """Replace every eval(<formula>) in an attribute value with just
+    <formula> - xmlinc's eval() wrapper is compile-time plumbing, not part
+    of the formula itself, so it doesn't need to clutter the YAML. Scans by
+    matching parens (not a regex) so a formula containing its own parens,
+    e.g. eval(($width-100)/2), still unwraps correctly. yml2xml.py's
+    wrapEval() puts the eval(...) back on the way to XML."""
+    out = []
+    i = 0
+    n = len(value)
+    while i < n:
+        if value.startswith("eval(", i):
+            depth = 1
+            j = i + 5
+            while j < n and depth > 0:
+                if value[j] == "(":
+                    depth += 1
+                elif value[j] == ")":
+                    depth -= 1
+                j += 1
+            out.append(value[i + 5:j - 1])
+            i = j
+        else:
+            out.append(value[i])
+            i += 1
+    return "".join(out)
+
 
 def yamlScalar(value):
     if isinstance(value, RawExpr):
@@ -272,10 +425,45 @@ def renderConvertBody(body, indent, lines):
             lines.append(f"{prefix}{key}: {yamlScalar(body[key])}")
 
 
+def renderDomainField(kind, field, indent, lines):
+    prefix = INDENT * indent
+    if kind == "raw":
+        # field is an untouched {call, args?, kwargs?} - same shape/rendering
+        # renderCallBlock() uses, just without its own leading "- call:" line
+        # since the fields-list loop below already emitted the dash+kind line.
+        lines.append(f"{prefix}call: {field['call']}")
+        if "args" in field:
+            lines.append(f"{prefix}args: {renderFlow(field['args'])}")
+        if "kwargs" in field:
+            lines.append(f"{prefix}kwargs:")
+            for k, v in field["kwargs"].items():
+                lines.append(f"{prefix}{INDENT}{k}: {renderKwargValue(k, v)}")
+        return
+    for key, value in field.items():
+        lines.append(f"{prefix}{key}: {renderKwargValue(key, value)}")
+
+
+def renderDomainCell(cell, indent, lines):
+    prefix = INDENT * indent
+    for key in ("itemHeight", "itemWidth", "width", "selectionEnabled", "scrollbarMode", "orientation"):
+        if key in cell:
+            lines.append(f"{prefix}{key}: {renderKwargValue(key, cell[key])}")
+    if "border" in cell:
+        lines.append(f"{prefix}border:")
+        for key, value in cell["border"].items():
+            lines.append(f"{prefix}{INDENT}{key}: {renderKwargValue(key, value)}")
+    lines.append(f"{prefix}fields:")
+    dash_indent = indent + 1
+    for item in cell["fields"]:
+        (kind, field), = item.items()
+        lines.append(f"{INDENT * dash_indent}- {kind}:")
+        renderDomainField(kind, field, dash_indent + 2, lines)
+
+
 def renderAttrs(attrs, indent, lines):
     prefix = INDENT * indent
     for k, v in attrs.items():
-        lines.append(f'{prefix}{k}: "{v}"')
+        lines.append(f'{prefix}{k}: "{stripEval(v)}"')
 
 
 def renderBody(tag, attrs, children, text, body_indent, lines):
@@ -296,7 +484,8 @@ def renderBody(tag, attrs, children, text, body_indent, lines):
         template = parseConvertTemplate(text)
         if template is not None:
             lines.append(f'{INDENT * body_indent}type: "{attrs.get("type", "")}"')
-            renderConvertBody(template, body_indent, lines)
+            lines.append(f"{INDENT * body_indent}cell:")
+            renderDomainCell(toDomainCell(template), body_indent + 1, lines)
             return
 
     renderAttrs(attrs, body_indent, lines)

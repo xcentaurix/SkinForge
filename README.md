@@ -74,24 +74,49 @@ xml2yml <source .xml/.xmlinc file> <destination .yml/.ymlinc file>   # XML -> YA
 
 ### The `<convert>` template special case
 
-A `<convert type="...">` block holding a `TemplatedMultiContent`/`TemplatedMultiContentEx` template is a Python dict literal, not markup, so it gets its own structured form instead of a blob of Python source text:
+A `<convert type="...">` block holding a `TemplatedMultiContent`/`TemplatedMultiContentEx` template is a Python dict literal, not markup — `RT_*`/`BT_*` flag algebra, `MultiContentEntry*` call names, and numeric font indices. Rather than mirroring that syntax 1:1, it's translated into a domain-level `cell:` describing what's actually shown in each row:
 
 ```yaml
-template:
-  - call: MultiContentEntryText
-    kwargs:
-      pos: [5, 5]
-      size: [55, 25]
-      flags: RT_HALIGN_LEFT | RT_VALIGN_CENTER
-      text: 0
+cell:
+  itemHeight: 150
+  border: {width: 1, color: 0x595959, font: "Regular;20", flags: RT_VALIGN_CENTER}
+  fields:
+    - text:
+        rect: [5, 5, 55, 25]        # merges pos=/size= into [x, y, w, h]
+        font: "Regular;20"          # resolved from the fonts index, same font="..." syntax every other widget uses
+        flags: RT_HALIGN_LEFT | RT_VALIGN_CENTER
+        value: 0                    # renamed from text= - still the raw tuple index, see note below
+    - icon:
+        rect: [0, 5, 35, 35]
+        flags: BT_SCALE
+        value: 23                   # renamed from png=
+    - progress:
+        rect: [90, 5, 90, 14]
+        value: -22                  # renamed from percent=
+        foreColor: "#bababa"
 ```
 
-- **Every entry factory is covered the same generic way** — `Text`, `Pixmap`, `PixmapAlphaTest`, `PixmapAlphaBlend`, `Progress`, `ProgressPixmap`, `Rectangle`, `LinearGradient`, `LinearGradientAlphaBlend` (the complete list in `Components/MultiContent.py`) — the `call` name is just emitted as-is, so nothing needs updating here if a new one is ever added.
-- **`MultiContentTemplateColor(n)` nests inside a color-ish kwarg**: `color: {call: MultiContentTemplateColor, args: [24]}`.
-- **`TemplatedMultiContentEx`'s `e`/`c` grid variables work in `pos=`/`size=` arithmetic**: `pos: [e - 350, 15]`.
+- **Three field kinds cover every real template in this codebase**: `text` (from `MultiContentEntryText`), `icon` (from `MultiContentEntryPixmapAlphaBlend`), `progress` (from `MultiContentEntryProgress`) — each only when the call has exactly the plain kwarg set observed in practice. Anything else (`Rectangle`, `LinearGradient*`, `Pixmap`/`PixmapAlphaTest`, `ProgressPixmap`, or a `Text`/`Icon`/`Progress` call with an unusual extra kwarg like `cornerRadius`) falls back to a `raw` field carrying the untouched `{call, args?, kwargs?}` shape described below — never lossy, it just doesn't get the readability upgrade.
+- **The empty-text border trick is recognized and hidden**: a `MultiContentEntryText(text="", border_width=..., border_color=...)` spanning the cell (the common way to draw a cell's frame) is pulled out of `fields:` entirely into `cell.border` and `cell.width`.
+- **`MultiContentTemplateColor(n)` still nests inside a color-ish key** exactly as before: `color: {call: MultiContentTemplateColor, args: [24]}`.
+- **Not in scope**: resolving `value: 0` to a semantic name (`value: startHM`) — that needs a per-plugin tuple-index mapping (e.g. a screen's own `Index.py`) this tool has no generic way to discover, so `value:` stays the raw index/literal, same information as `text=`/`png=`/`percent=` always held.
+
+A `raw` field (or an older, low-level `.ymlinc` written before this schema existed) uses the same generic representation for any `MultiContentEntry*`/`gFont` call:
+
+```yaml
+- raw:
+    call: MultiContentEntryRectangle
+    kwargs:
+      pos: [0, 0]
+      size: [50, 50]
+      backgroundColor: 0x123456
+```
+
+- **Every entry factory is covered the same generic way** — `Text`, `Pixmap`, `PixmapAlphaTest`, `PixmapAlphaBlend`, `Progress`, `ProgressPixmap`, `Rectangle`, `LinearGradient`, `LinearGradientAlphaBlend` (the complete list in `Components/MultiContent.py`) — the `call` name is just emitted as-is.
+- **`TemplatedMultiContentEx`'s `e`/`c` grid variables work in `pos=`/`size=` arithmetic** (and inside a domain field's `rect:`): `pos: [e - 350, 15]`.
 - **Kwarg values are quoted strings by default** (real Python string literals) — *except* `flags`, `call`, and `direction`, the three keys that hold code (`RT_*`/`BT_*`/`GRADIENT_*` constants, a callable name) rather than data. This is decided by key name, not by how the value was written: YAML's own parser can't tell a quoted string from a bare one apart once parsed, so quoting style alone can't carry the distinction through a round trip.
 
-See `TVMagazineCockpit/src/skin/default/skin.yml` / `screenpart_EventCell.ymlinc` and `MovieCockpit/src/skin/default/skin.xml`'s `TemplatedMultiContentEx` block for worked examples.
+See `TVMagazineCockpit/src/skin/default/screenpart_EventCell.ymlinc` and `MovieCockpit/src/skin/default/skin.xml`'s `TemplatedMultiContentEx` block for worked examples of the full domain schema (icon/text/progress mix, nested colors, `e`-arithmetic).
 
 ### Implementation notes
 
