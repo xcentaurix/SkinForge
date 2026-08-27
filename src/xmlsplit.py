@@ -7,7 +7,6 @@ import getopt
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from FileUtils import readFile, writeFile
-from Version import VERSION
 
 
 def pretty_file(src_file, dst_file):
@@ -75,7 +74,6 @@ def xmlsplit(src):
 
 
 def main(argv):
-    print(f"xmlsplit {VERSION}")
     src = ""
     opts = []
 

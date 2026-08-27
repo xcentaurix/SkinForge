@@ -6,7 +6,6 @@ import os
 import sys
 import getopt
 import xml.etree.ElementTree as ET
-from Version import VERSION
 
 
 def merge_files(src1, src2, dst):
@@ -22,7 +21,6 @@ def merge_files(src1, src2, dst):
 
 
 def xmlmerge(argv):
-    print(f"xmlmerge {VERSION}")
     src1 = ""
     src2 = ""
     dst = ""

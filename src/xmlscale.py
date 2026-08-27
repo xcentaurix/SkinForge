@@ -10,7 +10,6 @@ import xml.etree.ElementTree as ET
 # import xml.dom.minidom as minidom
 from fractions import Fraction
 from FileUtils import readFile, writeFile
-from Version import VERSION
 
 ending_values = ["Width", "Height", "Font", "Offset", "Margin", "HPos"]
 key_values = ["xres", "yres", "lineSpacing", "value", "textX", "textY", "pixmapX", "pixmapY", "separation", "rcheight",
@@ -298,7 +297,6 @@ class XML(Template):
 
 
 def scaleSkin(argv):
-    print(f"xmlscale {VERSION}")
     scale = ""
     src = ""
     dst = ""

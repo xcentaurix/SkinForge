@@ -8,7 +8,6 @@ import re
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from FileUtils import readFile, writeFile
-from Version import VERSION
 
 
 def listDir(adir):
@@ -90,7 +89,6 @@ def process_files(src, dst):
 
 
 def xmlpretty(argv):
-    print(f"xmlpretty {VERSION}")
     src = ""
     dst = ""
     opts = []

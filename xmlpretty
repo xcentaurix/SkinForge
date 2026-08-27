@@ -7,5 +7,4 @@ fi
 if [ -z "$dst" ]; then
 	dst=$src
 fi
-echo xmlpretty $src $dst
 python "$(dirname "$0")"/src/xmlpretty.py -i $src -o $dst

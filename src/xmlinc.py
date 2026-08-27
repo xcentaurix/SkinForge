@@ -9,7 +9,6 @@ import re
 import sys
 from FileUtils import readFile, writeFile
 from Pos import Pos
-from Version import VERSION
 
 
 # Base color names defined by the device's own GUI skin (e.g. MetrixHD's
@@ -353,7 +352,6 @@ def parseArgs(argv):
 
 
 def xmlinc(argv):
-    print(f"xmlinc {VERSION}")
     args = parseArgs(argv)
     srcinfile = os.path.normpath(args.srcinfile)
     srcoutfile = os.path.normpath(args.srcoutfile)

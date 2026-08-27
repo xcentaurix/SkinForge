@@ -44,7 +44,6 @@ import argparse
 import ast
 import sys
 from FileUtils import readFile, writeFile
-from Version import VERSION
 
 
 TEMPLATE_KEYS = (
@@ -509,21 +508,32 @@ def xml2yml(text):
     return "\n".join(lines) + "\n"
 
 
+def deriveOutFile(srcinfile):
+    if srcinfile.endswith(".noxmlinc"):
+        return srcinfile[: -len(".noxmlinc")] + ".noymlinc"
+    if srcinfile.endswith(".xmlinc"):
+        return srcinfile[: -len(".xmlinc")] + ".ymlinc"
+    if srcinfile.endswith(".xml"):
+        return srcinfile[: -len(".xml")] + ".yml"
+    raise ValueError(f"cannot derive output filename from: {srcinfile}")
+
+
 def parseArgs(argv):
     parser = argparse.ArgumentParser(prog="xml2yml.py")
     parser.add_argument("-i", dest="srcinfile", required=True, help="source .xml/.xmlinc file")
-    parser.add_argument("-o", dest="srcoutfile", required=True, help="destination .yml/.ymlinc file")
+    parser.add_argument("-o", dest="srcoutfile", default=None,
+                        help="destination .yml/.ymlinc file (default: input filename with opposite extension)")
     return parser.parse_args(argv)
 
 
 def main(argv):
-    print(f"xml2yml {VERSION}")
     args = parseArgs(argv)
+    srcoutfile = args.srcoutfile or deriveOutFile(args.srcinfile)
     print("src in file: " + args.srcinfile)
-    print("src out file: " + args.srcoutfile)
+    print("src out file: " + srcoutfile)
 
     output = xml2yml(readFile(args.srcinfile))
-    writeFile(args.srcoutfile, output)
+    writeFile(srcoutfile, output)
 
     print("xml2yml done.")
 

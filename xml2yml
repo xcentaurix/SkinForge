@@ -2,9 +2,10 @@
 src=$1
 dst=$2
 
-if [ -z "$1" ] || [ -z "$2" ]; then
-	echo "$0 <source file> <destination file>"
+if [ -z "$1" ]; then
+	echo "$0 <source file> [destination file]"
+elif [ -z "$2" ]; then
+	python "$(dirname "$0")"/src/xml2yml.py -i $src
 else
-	echo converting $src to $dst
 	python "$(dirname "$0")"/src/xml2yml.py -i $src -o $dst
 fi
