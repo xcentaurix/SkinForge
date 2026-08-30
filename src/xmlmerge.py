@@ -4,7 +4,7 @@
 
 import os
 import sys
-import getopt
+import argparse
 import xml.etree.ElementTree as ET
 
 
@@ -20,28 +20,19 @@ def merge_files(src1, src2, dst):
     tree1.write(dst)
 
 
+def parseArgs(argv):
+    parser = argparse.ArgumentParser(prog="xmlmerge.py")
+    parser.add_argument("-i", "--src1", dest="src1", required=True, help="first source file")
+    parser.add_argument("-j", "--src2", dest="src2", required=True, help="second source file")
+    parser.add_argument("-o", "--dst", dest="dst", required=True, help="destination file")
+    return parser.parse_args(argv)
+
+
 def xmlmerge(argv):
-    src1 = ""
-    src2 = ""
-    dst = ""
-    opts = []
-
-    try:
-        opts, _args = getopt.getopt(argv, "i:j:o:", ["src1=", "src2=", "dst="])
-    except getopt.GetoptError as e:
-        print("Error: " + str(e))
-
-    if len(opts) < 3:
-        print('Usage: python xmlmerge.py -i <src1> -j <src2> -o <dst>')
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in {'-i', '--src1'}:
-            src1 = os.path.normpath(arg)
-        elif opt in {'-j', '--src2'}:
-            src2 = os.path.normpath(arg)
-        elif opt in {'-o', '--dst'}:
-            dst = os.path.normpath(arg)
+    args = parseArgs(argv)
+    src1 = os.path.normpath(args.src1)
+    src2 = os.path.normpath(args.src2)
+    dst = os.path.normpath(args.dst)
 
     print("merging skins...")
     print('src1: ' + src1)
@@ -50,7 +41,7 @@ def xmlmerge(argv):
 
     merge_files(src1, src2, dst)
 
-    print("xmlmerge done.")
+    # print("xmlmerge done.")
 
 
 if __name__ == "__main__":

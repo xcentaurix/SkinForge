@@ -2,99 +2,97 @@
 # License: GNU General Public License v3.0
 
 
+import os
 import sys
-import getopt
+import argparse
 import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from FileUtils import readFile, writeFile
 
 
-def pretty_file(src_file, dst_file):
-    print(f"src_file: {src_file}")
-    print(f"dst_file: {dst_file}")
+def render_xmlinc_ref(node):
+    # Already a reference to an external file, not inline content to
+    # extract - preserve it exactly as written (file=, position=, any other
+    # attribute) rather than trying to "split" it. An xmlinc reference has
+    # a "file" attribute, never a "type"/"name" one, so this check has to
+    # run wherever we're about to assume a child is an inline definition to
+    # extract - not just among skin.xml's own top-level children, but also
+    # one level down inside <components>/<layouts>, since a shared
+    # component or layout (e.g. one already living in Common) can just as
+    # easily be an <xmlinc file="..."/> reference there instead of an
+    # inline definition.
+    attrs = "".join(f' {k}="{v}"' for k, v in node.attrib.items())
+    return f'<xmlinc{attrs}/>'
 
-    tree = ET.parse(src_file)
-    root = tree.getroot()
-    xml_string = ET.tostring(root, encoding="utf-8", method="xml")
-    xml_string = minidom.parseString(xml_string).toprettyxml(indent="\t")
-    lines = [line for line in xml_string.splitlines() if line.split()]
-    xml_string = "\n".join(lines)
-    xml_string = xml_string.replace("&quot;", '"')
-    # print(xml_string)
-    writeFile(dst_file, xml_string)
 
-
-def save_element_to_file(element, filename):
-    filename += ".xmlinc"
+def save_element_to_file(element, filename, srcdir):
+    # No pretty-printing here - xmlpretty.py already does this far more
+    # thoroughly (comma-spacing, <convert>-block reformatting, position=/
+    # size= tightening, ...) than this tool's own old minidom-based pass
+    # ever did; the wrapper script runs the real xmlpretty on every file
+    # this generates afterward instead.
+    filepath = os.path.join(srcdir, filename + ".xmlinc")
     tree = ET.ElementTree(element)
-    tree.write(filename)
-    pretty_file(filename, filename)
-    xmlinc = readFile(filename).splitlines()
-    del xmlinc[0]
-    xmlinc2 = "\n".join(xmlinc)
-    writeFile(filename, xmlinc2)
+    tree.write(filepath)
+    print(f"GENERATED: {filepath}")
 
 
 def xmlsplit(src):
+    srcdir = os.path.dirname(src)
     xml_string = readFile(src)
     tree = ET.ElementTree(ET.fromstring(xml_string))
     root = tree.getroot()
     skinlines = ["<skin>"]
     for node in root:
         print(node.tag)
-        if node.tag == "components":
+        if node.tag == "xmlinc":
+            skinlines.append(render_xmlinc_ref(node))
+        elif node.tag == "components":
             skinlines.append("<components>")
             for comp in node:
+                if comp.tag == "xmlinc":
+                    skinlines.append(render_xmlinc_ref(comp))
+                    continue
                 filename = comp.tag + "_" + comp.attrib["type"]
-                save_element_to_file(comp, filename)
-                skinlines.append(f'<xmlinc name="{filename}"/>')
+                save_element_to_file(comp, filename, srcdir)
+                skinlines.append(f'<xmlinc file="{filename}"/>')
             skinlines.append("</components>")
         elif node.tag == "layouts":
             skinlines.append("<layouts>")
             for comp in node:
+                if comp.tag == "xmlinc":
+                    skinlines.append(render_xmlinc_ref(comp))
+                    continue
                 filename = comp.tag + "_" + comp.attrib["name"]
-                save_element_to_file(comp, filename)
-                skinlines.append(f'<xmlinc name="{filename}"/>')
+                save_element_to_file(comp, filename, srcdir)
+                skinlines.append(f'<xmlinc file="{filename}"/>')
             skinlines.append("</layouts>")
         elif node.tag in {"windowstyle", "windowstylescrollbar"}:
             filename = node.tag + "_" + node.attrib["id"]
-            save_element_to_file(node, filename)
-            skinlines.append(f'<xmlinc name="{filename}"/>')
+            save_element_to_file(node, filename, srcdir)
+            skinlines.append(f'<xmlinc file="{filename}"/>')
         else:
             if "name" in node.attrib:
                 filename = node.tag + "_" + node.attrib["name"]
             else:
                 filename = node.tag
-            save_element_to_file(node, filename)
-            skinlines.append(f'<xmlinc name="{filename}"/>')
+            save_element_to_file(node, filename, srcdir)
+            skinlines.append(f'<xmlinc file="{filename}"/>')
     skinlines.append("</skin>")
     skin = "\n".join(skinlines)
-    writeFile("skin_split.xml", skin)
-    pretty_file("skin_split.xml", "skin_split.xml")
+    writeFile(src, skin)
+    print(f"GENERATED: {src}")
+
+
+def parseArgs(argv):
+    parser = argparse.ArgumentParser(prog="xmlsplit.py")
+    parser.add_argument("-i", dest="src", required=True, help="source file")
+    return parser.parse_args(argv)
 
 
 def main(argv):
-    src = ""
-    opts = []
-
-    # print("argv: " + str(argv))
-    try:
-        opts, _args = getopt.getopt(argv, "s:", [])
-        # print("opts: " + str(opts))
-    except getopt.GetoptError as e:
-        print("Error: " + str(e))
-
-    if len(opts) < 1:
-        print("python xmlsplit.py -s <src file>")
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt == "-i":
-            src = arg
-
-    print("src: " + src)
-
-    xmlsplit(src)
+    args = parseArgs(argv)
+    print("src: " + args.src)
+    xmlsplit(args.src)
 
 
 if __name__ == "__main__":

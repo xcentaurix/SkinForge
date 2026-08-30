@@ -1,0 +1,40 @@
+#!/bin/bash
+domain=$(getdomain "$1")
+if [ -z "$domain" ]; then
+	echo no valid domain specified
+	exit 1
+fi
+echo "Domain: $domain"
+
+git=$HOME/git
+srcskin=$git/dev/$domain/src/skin
+dstskin=$git/rel/$domain/src/skin
+cmnskin=$git/dev/Common/src/skin
+
+scriptdir=$(dirname "$0")
+
+if [ ! -d "$dstskin" ]; then
+	echo "Error: $dstskin does not exist"
+	exit 1
+fi
+
+for file in "$dstskin/"*; do
+	[ -d "$file" ] || continue
+	skin=$(basename "$file")
+
+	if [ ! -f "$srcskin/$skin/skin.xml" ]; then
+		continue
+	else
+		echo "skin: $skin"
+
+		# compile the xml source
+		if [ -f "$dstskin/$skin/skin.xml" ]; then
+			echo "compiling $dstskin/$skin/skin.xml..."
+			"$scriptdir/xmlinc" "$srcskin/$skin/skin.xml" "$dstskin/$skin/skin.xml" "$dstskin/$skin" "$cmnskin/$skin"
+			sed -i 's/%PLUGIN%/'$domain'/g' "$dstskin/$skin/skin.xml"
+			"$scriptdir/xmlpretty" "$dstskin/$skin/skin.xml" "$dstskin/$skin/skin.xml"
+		else
+			echo "no skin.xml at $dstskin/$skin, skipping compile"
+		fi
+	fi
+done

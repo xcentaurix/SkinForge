@@ -22,206 +22,190 @@ KNOWN_BASE_COLORS = {
     "transparent", "foreground", "background",
 }
 
+VAR_RE = re.compile(r"\$\w+")
 
-class XMLInclude():
+
+# ---------------------------------------------------------------------------
+# XML tree parser - same recursive-descent approach as xml2yml.py's
+# XmlParser (see that file for the rationale: no third-party dependency),
+# adapted for xmlinc's own needs: attribute values and text content are
+# captured raw and unescaped-only here - $var substitution and eval() are
+# semantic operations applied later, during the tree-walk in XMLInclude,
+# not part of parsing. A document with more than one top-level element is
+# supported (see parseDocument()) since an xmlinc *source* file, unlike a
+# real XML document, isn't required to have exactly one root - it's spliced
+# into its parent by element substitution, not loaded standalone.
+# ---------------------------------------------------------------------------
+
+class Comment:
+    __slots__ = ("text",)
+
+    def __init__(self, text):
+        self.text = text
+
+
+class RawText:
+    """An applet_* include's content - spliced in completely unprocessed
+    and unescaped (it isn't necessarily even valid XML), wherever in the
+    tree the <xmlinc file="applet_..."/> that pulled it in appears - a
+    top-level sibling or nested inside another element's children."""
+    __slots__ = ("text",)
+
+    def __init__(self, text):
+        self.text = text
+
+
+class Element:
+    __slots__ = ("tag", "attrs", "children", "text")
+
+    def __init__(self, tag, attrs, children, text):
+        self.tag = tag
+        self.attrs = attrs          # dict, insertion order = source order
+        self.children = children    # list of Element/Comment, or None
+        self.text = text            # str, or None (mutually exclusive with children)
+
+
+class XmlParser:
+    def __init__(self, text):
+        self.text = text
+        self.pos = 0
+        self.n = len(text)
+
+    def skipSpace(self):
+        while self.pos < self.n and self.text[self.pos].isspace():
+            self.pos += 1
+
+    def parseDocument(self):
+        self.skipSpace()
+        if self.text.startswith("<?", self.pos):
+            self.pos = self.text.index("?>", self.pos) + 2
+            self.skipSpace()
+        nodes = []
+        while self.pos < self.n:
+            if self.text.startswith("<!--", self.pos):
+                nodes.append(self.parseComment())
+                self.skipSpace()
+                continue
+            if self.text[self.pos] != "<":
+                break  # stray trailing whitespace/text at the top level
+            nodes.append(self.parseElement())
+            self.skipSpace()
+        if len(nodes) == 1 and isinstance(nodes[0], Element):
+            return nodes[0]
+        return nodes
+
+    def parseComment(self):
+        start = self.pos + 4
+        end = self.text.index("-->", start)
+        comment = Comment(self.text[start:end].strip())
+        self.pos = end + 3
+        return comment
+
+    def parseName(self):
+        start = self.pos
+        while self.pos < self.n and (self.text[self.pos].isalnum() or self.text[self.pos] in "_:.-"):
+            self.pos += 1
+        return self.text[start:self.pos]
+
+    def parseAttrValue(self):
+        quote = self.text[self.pos]
+        self.pos += 1
+        end = self.text.index(quote, self.pos)
+        value = self.text[self.pos:end]
+        self.pos = end + 1
+        return value
+
+    def parseElement(self):
+        assert self.text[self.pos] == "<"
+        self.pos += 1
+        tag = self.parseName()
+        attrs = {}
+        while True:
+            self.skipSpace()
+            if self.text.startswith("/>", self.pos):
+                self.pos += 2
+                return Element(tag, attrs, None, None)
+            if self.text[self.pos] == ">":
+                self.pos += 1
+                break
+            name = self.parseName()
+            self.skipSpace()
+            assert self.text[self.pos] == "="
+            self.pos += 1
+            self.skipSpace()
+            attrs[name] = self.parseAttrValue()
+
+        children, text = self.parseContent()
+        assert self.text.startswith("</", self.pos), f"unclosed tag: <{tag}>"
+        self.pos += 2
+        end_tag = self.parseName()
+        assert end_tag == tag, f"mismatched close tag: <{tag}> ... </{end_tag}>"
+        self.skipSpace()
+        assert self.text[self.pos] == ">"
+        self.pos += 1
+        return Element(tag, attrs, children, text)
+
+    def parseContent(self):
+        children = []
+        text_parts = []
+        while True:
+            if self.text.startswith("</", self.pos):
+                break
+            if self.text.startswith("<!--", self.pos):
+                children.append(self.parseComment())
+                continue
+            if self.text[self.pos] == "<":
+                children.append(self.parseElement())
+                continue
+            next_lt = self.text.index("<", self.pos)
+            text_parts.append(self.text[self.pos:next_lt])
+            self.pos = next_lt
+        if children:
+            return children, None
+        text = "".join(text_parts).strip()
+        return None, (text if text else None)
+
+
+def renderAttrs(attrs):
+    return "".join(f' {k}="{v}"' for k, v in attrs.items())
+
+
+def renderNode(node, lines):
+    if isinstance(node, RawText):
+        lines.extend(node.text.splitlines())
+        return
+    if isinstance(node, Comment):
+        lines.append(f"<!-- {node.text} -->")
+        return
+    attr_str = renderAttrs(node.attrs)
+    if node.children:
+        lines.append(f"<{node.tag}{attr_str}>")
+        for child in node.children:
+            renderNode(child, lines)
+        lines.append(f"</{node.tag}>")
+    elif node.text is not None:
+        lines.append(f"<{node.tag}{attr_str}>{node.text}</{node.tag}>")
+    else:
+        lines.append(f"<{node.tag}{attr_str}/>")
+
+
+# ---------------------------------------------------------------------------
+# xmlinc: walks the parsed tree, resolving <xmlinc>/<global>/<screen>/
+# <layout> and every $var/eval()/position offset - the semantic layer that
+# used to be entangled with parsing itself in the old line/token version.
+# ---------------------------------------------------------------------------
+
+class XMLInclude:
     def __init__(self, srcdir, dstdir, cmndir):
         self.srcdir = srcdir
         self.dstdir = dstdir
         self.cmndir = cmndir
-        self.sep1 = (
-            " ", '"', "{", "[", "(", ",", ";", ":", "=", "}", "]", ")")
-        self.sep2 = ("+", "-", "*", "/", "%")
         self.globals = {}
         self.layouts = []
         self.colors = {}
         self.current_screen = "?"
+        self.current_file = ""
         self.last_font_var = None
-
-    def clean(self, i):
-        o = i.replace("\n", " ").replace("\t", " ")
-        o = o.replace(" = ", "=")
-        o = o.replace("; ", ";")
-        o = " ".join(o.split())
-        o = o.replace("><", ">Â§<")
-        o = o.replace("> <", ">Â§<")
-        o = o.split("Â§")
-        return o
-
-    def split(self, s, sep):
-        o = []
-        b = ""
-        e = ""
-
-        # print("split: s: %s" % s)
-        if s.startswith("</"):
-            s = s[2:]
-            b = "</"
-        elif s.startswith("<"):
-            s = s[1:]
-            b = "<"
-        if s.endswith("/>"):
-            s = s[:-2]
-            e = "/>"
-        elif s.endswith(">"):
-            s = s[:-1]
-            e = ">"
-
-        pattern = f"({'|'.join(re.escape(c) for c in sep)})"
-        r = re.split(pattern, s)
-        r = [item for item in r if item != '']
-
-        if b:
-            o.append(b)
-        o += r
-        if e:
-            o.append(e)
-        # print("split: o: %s" % o)
-        return o
-
-    def updatePositions(self, words, pos):
-        for i, word in enumerate(words):
-            if 0 < i < len(words) - 1 and words[i - 1] != '"' and words[i + 1] == "=":
-                if word == "position" and words[i + 2] == '"':
-                    pos2 = Pos(words[i + 3], words[i + 5])
-                    # print("updatePositions: pos2: (%s,%s)" % (pos2.x, pos2.y))
-                    new_pos = pos + pos2
-                    # print("updatePositions: new_pos: (%s,%s)" % (new_pos.x, new_pos.y))
-                    words[i + 3] = str(new_pos.x)
-                    words[i + 5] = str(new_pos.y)
-        return words
-
-    def parseColors(self, colors_inc):
-        print(f"parseColors: colors_inc: {colors_inc}")
-        if os.path.exists(colors_inc):
-            ilines = self.clean(readFile(colors_inc))
-            for iline in ilines:
-                # print("parseColors: iline: %s" % iline)
-                iline_words = self.split(iline, self.sep1)
-                if iline_words[1] == "color":
-                    tags = self.parseTags(iline_words)
-                    # print("parseColors: tags: %s" % tags)
-                    if "name" in tags and "value" in tags:
-                        self.colors["$" + tags["name"]] = tags["value"]
-        # print("parseColors: self.colors: %s" % self.colors)
-
-    def evaluateFormulas(self, words):
-        # print("eval: words: %s" % words)
-        output = []
-        i = 0
-        while i < len(words):
-            if words[i] == "eval":
-                formula = ""
-                i += 1
-                level = 0
-                while level > 0 or not formula:
-                    if words[i] in {"(", ")"}:
-                        level += 1 if words[i] == "(" else -1
-                    formula += words[i]
-                    i += 1
-
-                # Debug: Print what we're evaluating
-                # print("DEBUG: evaluating formula: %s" % formula)
-
-                formula = re.sub(r'(?<!/)/(?!/)', '//', formula)
-                eval_result = eval(formula)  # pylint: disable=eval-used
-                if isinstance(eval_result, float):
-                    if eval_result >= 0:
-                        result = int(math.floor(eval_result + 0.5))
-                    else:
-                        result = int(math.ceil(eval_result - 0.5))
-                else:
-                    result = int(eval_result)
-
-                # print("DEBUG: final result: %s" % result)
-                output.append(str(result))
-            else:
-                output.append(words[i])
-                i += 1
-        # print("output: %s" % output)
-        return output
-
-    def checkFonts(self, tags):
-        for tag in tags:
-            if tag == "font" and "size" in tags:
-                font_parts = tags["font"].split(";")
-                if len(font_parts) > 1:
-                    font_size = font_parts[1]
-                    try:
-                        size_height = tags["size"].split(",")[1]
-                        if float(size_height) < float(font_size) * 4.0 / 3.0:
-                            widget = tags.get("name") or tags.get("source") or "?"
-                            fontvar = self.last_font_var or "(literal)"
-                            screen_h = self.globals.get("$screen_height", "?")
-                            print(f"WARNING: screen={self.current_screen} screen_h={screen_h} widget={widget} font={fontvar} size: {size_height} < font: {float(font_size) * 4.0 / 3.0}")
-                    except Exception:
-                        pass
-
-    def parseTags(self, words):
-        tags = {}
-        for i, word in enumerate(words):
-            if word == "xmlinc":
-                tags[word] = words[words.index("file") + 3]
-            elif word in {"screen", "layout", "global"}:
-                tags[word] = words[-1]
-            elif word == "=":
-                if words[i + 1] == '"':
-                    # print("words 1: %s" % words)
-                    if words[i - 1] in {"size"}:
-                        if words[i + 3] == ",":
-                            tags[words[i - 1]] = f"{words[i + 2]},{words[i + 4]}"
-                        else:
-                            tags[words[i - 1]] = f"{words[i + 2]}"
-                    elif words[i - 1] in {"font"}:
-                        if words[i + 3] == ";":
-                            tags[words[i - 1]] = f"{words[i + 2]};{words[i + 4]}"
-                    elif words[i - 1] in {"position"}:
-                        if words[i + 2] != "fill":
-                            tags[words[i - 1]] = f"{words[i + 2]},{words[i + 4]}"
-                    elif words[i - 1] in {"value"}:
-                        j = i + 2
-                        parts = []
-                        while words[j] != '"':
-                            parts.append(words[j])
-                            j += 1
-                        tags[words[i - 1]] = "".join(parts)
-                    elif words[i - 1].endswith("Color"):
-                        if not words[i + 2].startswith("#") and words[i + 2] != "(":
-                            color = words[i + 2]
-                            if "$" + color not in self.colors and color not in self.colors and color not in KNOWN_BASE_COLORS:
-                                print(f"ERROR: color {color} not defined")
-                        tags[words[i - 1]] = words[i + 2]
-                    else:
-                        tags[words[i - 1]] = words[i + 2]
-                else:
-                    tags[words[i - 1]] = words[i + 1]
-        # print("parseTags: words: %s" % words)
-        # print("parseTags: tags: %s" % tags)
-        return tags
-
-    def parseGlobals(self, tags):
-        if "global" in tags:
-            self.globals["$" + tags["name"]] = tags["value"]
-        elif "screen" in tags:
-            # print("parseGlobals: tags: %s" % tags)
-            self.current_screen = tags.get("name", "?")
-            if "size" in tags:
-                size = tags["size"].split(",")
-                self.globals["$screen_width"] = size[0]
-                self.globals["$screen_height"] = size[1]
-        elif tags and "layout" in tags and tags["layout"] == ">":
-            # print(">>> adding layout: %s" % tags["name"])
-            self.layouts.append(tags["name"])
-        elif "xmlinc" in tags:
-            for tag in tags:
-                # print("parseGlobals: %s - %s -> %s" % (tags["xmlinc"], tag, tags[tag]))
-                if tag == "size":
-                    size = tags[tag].split(",")
-                    self.globals["$width"] = size[0]
-                    self.globals["$height"] = size[1]
-                else:
-                    self.globals["$" + tag] = tags[tag]
-        # print("parseTags: tags: %s" % tags)
-        # print("parseTags: globals: %s" % self.globals)
 
     def getIncFilePath(self, inc_filename):
         if not os.path.splitext(inc_filename)[1]:
@@ -246,7 +230,7 @@ class XMLInclude():
                     if not os.path.exists(inc_file):
                         print(f"ERROR: inc file: {inc_file} not found.")
 
-        return inc_file, False
+        return inc_file
 
     def resolveVar(self, var):
         if var in self.colors:
@@ -262,84 +246,262 @@ class XMLInclude():
             print(f"ERROR: global {var} not found.")
             return var
 
-    def resolveGlobals(self, words):
-        owords = []
-        for word in words:
-            if "$" in word:
-                # $vars aren't always their own token - e.g. "picon$index" has no
-                # separator between the literal prefix and the variable, so it
-                # survives tokenization as a single word. Substitute every $name
-                # occurrence within the word rather than requiring the whole word
-                # to be one.
-                word = re.sub(r"\$\w+", lambda m: self.resolveVar(m.group(0)), word)
-            owords.append(word)
-        oline = "".join(owords)
-        # print("+++ oline: %s" % oline)
-        return oline
+    def normalizeText(self, text):
+        """Tightens "kwarg = value" to "kwarg=value" (and "; " to ";") in
+        element text content (a <convert> block's Python-source body,
+        mainly) - the original tool's clean() step did this as a side
+        effect of also flattening the whole file to one line per tag, which
+        this rewrite's real XML parsing makes unnecessary for structure,
+        but a hand-typed convert body written with that looser "=" spacing
+        still needs tightening to match this codebase's convention.
 
-    def processApplet(self, level, olines, afile):
-        print(f"==> processApplet:  >{level}, {afile})")
-        olines.extend(readFile(afile).splitlines())
+        Deliberately does NOT touch newlines/indentation: a source fragment
+        that's already nicely multi-line (e.g. after an earlier xmlpretty
+        run) should stay that way once spliced into the compiled skin.xml -
+        xmlpretty's own reformatting handles either already-multi-line or
+        single-line input fine for a recognized TemplatedMultiContent(Ex)
+        body (it rebuilds structure from scratch), but for a convert type
+        it doesn't recognize (raw passthrough) it can only re-indent
+        existing lines, not rebuild missing structure - so flattening here
+        would strip formatting nothing downstream can restore."""
+        return text.replace(" = ", "=").replace("; ", ";")
 
-    def processFile(self, level, olines, afile, pos, do_delete):
-        print(f"==> processFile: >{level}, ({pos.x},{pos.y}), {afile}, do_delete: {do_delete}")
-        if level == 0 and not os.path.isfile(afile):
-            afile, do_delete = self.getIncFilePath(afile)
-        if level == 1:
-            print("")
+    def resolveValue(self, value):
+        """$var substitution, then eval(...) evaluation, in that order (a
+        formula can reference a global by name) - applied to one attribute
+        value or text-content string at a time, each fully self-contained
+        (an XML-parsed attribute value's boundaries are never ambiguous the
+        way they were for the old token-position approach)."""
+        if "$" in value:
+            value = VAR_RE.sub(lambda m: self.resolveVar(m.group(0)), value)
+        if "eval" in value:
+            value = self.evaluateFormulas(value)
+        return value
 
-        ilines = self.clean(readFile(afile))
-        for iline in ilines:
-            # print("processFile: iline: %s" % iline)
-            self.last_font_var = None
-            iline_words = self.split(iline, self.sep1 + self.sep2)
-            if "$" in iline:
-                iline = self.resolveGlobals(iline_words)
-            iline_words = self.split(iline, self.sep1)
-            if "eval" in iline_words:
-                iline_words = self.evaluateFormulas(iline_words)
-            tags = self.parseTags(iline_words)
-            if "Summary" not in afile:
-                self.checkFonts(tags)
-            self.parseGlobals(tags)
-            if "layout" in tags:
-                # print("tags: %s" % tags)
-                if "layout" in tags and tags["layout"] == "/>":
-                    # print(">>>> tags: %s, layouts: %s" % (tags["name"], self.layouts))
-                    if level == 1:
-                        print("")
-                    if not tags["name"] in self.layouts:
-                        print(f"==> processFile: >{level}, ERROR: layout {tags['name']} not defined")
-                    print(f"==> processFile: >{level}, >>> including layout {tags['name']}")
-            if "xmlinc" in tags:
-                inc_filename = tags["xmlinc"]
-                # print("processFile: inc_filename: %s" % inc_filename)
-                pos2 = pos
-                if "position" in tags:
-                    # print("processFile: tags.position: %s" % tags["position"])
-                    pos2 = pos + Pos(tags["position"])
-                    # print("processFile: pos2: (%s,%s)" % (pos2.x, pos2.y))
-                inc_file, next_delete = self.getIncFilePath(inc_filename)
-                self.parseColors(inc_file)
-                if os.path.basename(inc_file).startswith("applet_"):
-                    self.processApplet(level + 1, olines, inc_file)
+    def evaluateFormulas(self, text):
+        out = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if text.startswith("eval", i) and (i + 4 >= n or not (text[i + 4].isalnum() or text[i + 4] == "_")):
+                j = i + 4
+                while j < n and text[j] != "(":
+                    j += 1
+                start = j
+                level = 0
+                while True:
+                    if text[j] == "(":
+                        level += 1
+                    elif text[j] == ")":
+                        level -= 1
+                        if level == 0:
+                            j += 1
+                            break
+                    j += 1
+                formula = text[start:j]
+                formula = re.sub(r'(?<!/)/(?!/)', '//', formula)
+                eval_result = eval(formula)  # pylint: disable=eval-used
+                if isinstance(eval_result, float):
+                    if eval_result >= 0:
+                        result = int(math.floor(eval_result + 0.5))
+                    else:
+                        result = int(math.ceil(eval_result - 0.5))
                 else:
-                    self.processFile(level + 1, olines,
-                                     inc_file, pos2, next_delete)
-                # print("-----> processFile: continue with: " + afile)
-            elif "global" in tags:
-                pass
+                    result = int(eval_result)
+                out.append(str(result))
+                i = j
             else:
-                # print("processFile: globals: %s" % self.globals)
-                if "position" in iline_words:
-                    iline_words = self.updatePositions(iline_words, pos)
-                iline = "".join(iline_words)
-                olines.append(iline)
+                out.append(text[i])
+                i += 1
+        return "".join(out)
 
-        if do_delete:
-            os.remove(afile)
+    def checkFonts(self, attrs):
+        if "font" not in attrs or "size" not in attrs:
+            return
+        font_parts = attrs["font"].split(";")
+        if len(font_parts) <= 1:
+            return
+        font_size = font_parts[1]
+        try:
+            size_height = attrs["size"].split(",")[1]
+            if float(size_height) < float(font_size) * 4.0 / 3.0:
+                widget = attrs.get("name") or attrs.get("source") or "?"
+                fontvar = self.last_font_var or "(literal)"
+                screen_h = self.globals.get("$screen_height", "?")
+                print(f"WARNING: screen={self.current_screen} screen_h={screen_h} widget={widget} font={fontvar} size: {size_height} < font: {float(font_size) * 4.0 / 3.0}")
+        except Exception:
+            pass
 
-        # print("<===== processFile: >%s" + (level, afile))
+    def checkColor(self, key, value):
+        if not key.endswith("Color"):
+            return
+        if value.startswith("#") or value.startswith("$") or value == "":
+            return
+        if "$" + value not in self.colors and value not in self.colors and value not in KNOWN_BASE_COLORS:
+            print(f"ERROR: color {value} not defined")
+
+    def scanColors(self, node):
+        """Pre-scans an about-to-be-included file's own tree for <color
+        name=... value=.../> declarations, feeding self.colors - mirrors
+        the old parseColors()'s independent scan, run before the file is
+        otherwise processed, so a color it declares is already resolvable
+        by anything (including itself) once real processing starts."""
+        nodes = node if isinstance(node, list) else [node]
+        for n in nodes:
+            if isinstance(n, Comment):
+                continue
+            if n.tag == "color" and "name" in n.attrs and "value" in n.attrs:
+                self.colors["$" + n.attrs["name"]] = n.attrs["value"]
+            if n.children:
+                self.scanColors(n.children)
+
+    def offsetPositions(self, node, pos):
+        """Applies a position=(x,y) offset to every element anywhere in
+        this subtree that has its own position= attribute - not just
+        direct children - since an <xmlinc position=.../> shifts
+        everything nested under it, arbitrarily deep through further
+        nested includes."""
+        nodes = node if isinstance(node, list) else [node]
+        for n in nodes:
+            if not isinstance(n, Element):
+                continue
+            if "position" in n.attrs and n.attrs["position"] != "fill":
+                # Pos has no __str__ - build the string from .x/.y directly,
+                # same as the original's updatePositions() did.
+                new_pos = pos + Pos(n.attrs["position"])
+                n.attrs["position"] = f"{new_pos.x},{new_pos.y}"
+            if n.children:
+                self.offsetPositions(n.children, pos)
+
+    def processInclude(self, level, node, pos):
+        """Resolves one <xmlinc> element: locates the file, registers its
+        other attributes as $vars, recurses into it (or splices it in
+        completely unprocessed for an applet_* file), and returns the
+        replacement node(s) to substitute in its place."""
+        attrs = node.attrs
+        inc_filename = self.resolveValue(attrs["file"])
+        pos2 = pos
+        if "position" in attrs:
+            pos2 = pos + Pos(self.resolveValue(attrs["position"]))
+        inc_file = self.getIncFilePath(inc_filename)
+
+        if os.path.basename(inc_file).startswith("applet_"):
+            print(f"==> processApplet: >{level}, {inc_file}")
+            return RawText(readFile(inc_file))
+
+        self.scanColors(XmlParser(readFile(inc_file)).parseDocument())
+
+        resolved_attrs = {}
+        for key, value in attrs.items():
+            if key in {"file", "position"}:
+                continue
+            value = self.resolveValue(value)
+            resolved_attrs[key] = value
+            if key == "size":
+                w, h = value.split(",")
+                self.globals["$width"] = w
+                self.globals["$height"] = h
+            self.globals["$" + key] = value
+        self.checkFonts(resolved_attrs)
+
+        result = self.processFile(level + 1, inc_file)
+        if isinstance(result, list):
+            for r in result:
+                if isinstance(r, Element):
+                    self.offsetPositions(r, pos2)
+        elif isinstance(result, Element):
+            self.offsetPositions(result, pos2)
+        return result
+
+    def processElement(self, level, node):
+        """Returns the processed replacement for one element - a single
+        Element/Comment, a list of them (an <xmlinc> can expand to more
+        than one top-level sibling), or None (an element that's build-time
+        only and never appears in the compiled output, e.g. <global>)."""
+        if isinstance(node, Comment):
+            return node
+
+        self.last_font_var = None
+
+        if node.tag == "xmlinc":
+            # An include's own position= is always relative to its own
+            # file's local coordinate system (Pos(0,0)) - accumulation
+            # across nesting levels happens entirely through the bubble-up
+            # offsetPositions() call below, once per enclosing level, not
+            # by threading a running total down into each recursive call.
+            return self.processInclude(level, node, Pos(0, 0))
+
+        if node.tag == "global":
+            self.globals["$" + node.attrs["name"]] = self.resolveValue(node.attrs["value"])
+            return None
+
+        if node.tag == "screen":
+            if "size" in node.attrs:
+                w, h = self.resolveValue(node.attrs["size"]).split(",")
+                self.globals["$screen_width"] = w
+                self.globals["$screen_height"] = h
+            self.current_screen = node.attrs.get("name", "?")
+
+        if node.tag == "layout":
+            if node.children is None and node.text is None:
+                # self-closing <layout name="x"/> - a reference, not a
+                # declaration: just validate and pass through unchanged,
+                # same as the original (this doesn't actually splice
+                # anything - see the module's design notes).
+                name = node.attrs.get("name")
+                if name not in self.layouts:
+                    print(f"==> processFile: >{level}, ERROR: layout {name} not defined")
+                else:
+                    print(f"==> processFile: >{level}, >>> including layout {name}")
+            else:
+                self.layouts.append(node.attrs.get("name"))
+
+        new_attrs = {}
+        for key, value in node.attrs.items():
+            value = self.resolveValue(value)
+            self.checkColor(key, value)
+            new_attrs[key] = value
+        if "Summary" not in self.current_file:
+            self.checkFonts(new_attrs)
+
+        new_children = None
+        if node.children:
+            new_children = []
+            for child in node.children:
+                result = self.processElement(level, child)
+                if result is None:
+                    continue
+                if isinstance(result, list):
+                    new_children.extend(result)
+                else:
+                    new_children.append(result)
+
+        new_text = self.resolveValue(self.normalizeText(node.text)) if node.text is not None else None
+        return Element(node.tag, new_attrs, new_children, new_text)
+
+    def processFile(self, level, afile):
+        print(f"==> processFile: >{level}, {afile}")
+        # Restored on the way back out - checkFonts()'s "Summary" exemption
+        # needs to see *this* file's own path while processing its
+        # elements, then the enclosing file's path again once a nested
+        # include here has been fully processed and control returns to it.
+        prev_file = self.current_file
+        self.current_file = afile
+        try:
+            doc = XmlParser(readFile(afile)).parseDocument()
+            nodes = doc if isinstance(doc, list) else [doc]
+            results = []
+            for n in nodes:
+                result = self.processElement(level, n)
+                if result is None:
+                    continue
+                if isinstance(result, list):
+                    results.extend(result)
+                else:
+                    results.append(result)
+            return results if len(results) != 1 else results[0]
+        finally:
+            self.current_file = prev_file
 
 
 def parseArgs(argv):
@@ -368,13 +530,17 @@ def xmlinc(argv):
     print("dst dir: " + dstdir)
     print("cmn dir: " + cmndir)
 
-    olines = []
-    XMLInclude(srcdir, dstdir, cmndir).processFile(
-        0, olines, srcfn, Pos(0, 0), False)
-    output = "\n".join(olines) + "\n"
+    inc = XMLInclude(srcdir, dstdir, cmndir)
+    result = inc.processFile(0, srcinfile)
+
+    lines = []
+    nodes = result if isinstance(result, list) else [result]
+    for node in nodes:
+        renderNode(node, lines)
+    output = "\n".join(lines) + "\n"
     writeFile(srcoutfile, output)
 
-    print("xmlinc done.")
+    # print("xmlinc done.")
 
 
 if __name__ == "__main__":

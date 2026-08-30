@@ -42,7 +42,10 @@
 
 import argparse
 import ast
+import os
+import re
 import sys
+import textwrap
 from FileUtils import readFile, writeFile
 
 
@@ -89,14 +92,38 @@ class XmlParser():
             self.pos += 1
 
     def parseDocument(self):
+        """Returns a single (tag, attrs, children, text) tuple for the
+        common case of exactly one top-level element (unchanged from
+        before - every existing caller keeps working untouched), or a list
+        of Commented-wrapped ones if the source has more than one - true
+        XML requires exactly one root, but a .xmlinc *fragment* (spliced
+        into a parent document via literal text substitution) can be
+        several bare sibling elements with nothing wrapping them, e.g.
+        Common's screenpart_BottomBar.xmlinc (two sibling <eLabel/>s) -
+        silently parsing and returning only the first one, as this used to,
+        is real, silent data loss for any such file."""
         self.skipSpace()
         if self.text.startswith("<?", self.pos):
             self.pos = self.text.index("?>", self.pos) + 2
         self.skipSpace()
-        while self.text.startswith("<!--", self.pos):
-            self.skipComment()
+        elements = []
+        pending_comment = None
+        while self.pos < self.n:
+            if self.text.startswith("<!--", self.pos):
+                start = self.pos + 4
+                end = self.text.index("-->", start)
+                pending_comment = self.text[start:end].strip()
+                self.pos = end + 3
+                self.skipSpace()
+                continue
+            if self.text[self.pos] != "<":
+                break  # stray trailing whitespace/text at the top level
+            elements.append(Commented(self.parseElement(), pending_comment))
+            pending_comment = None
             self.skipSpace()
-        return self.parseElement()
+        if len(elements) == 1:
+            return elements[0].value
+        return elements
 
     def skipComment(self):
         self.pos = self.text.index("-->", self.pos) + 3
@@ -176,28 +203,122 @@ class XmlParser():
 # Python-template parsing (the <convert> special case), via `ast`
 # ---------------------------------------------------------------------------
 
-def exprToValue(node):
+FORMULA_OP_RE = re.compile(r"\s*([+\-*/|])\s*")
+
+
+def compactFormula(text):
+    """ast.unparse() always spaces binary operators (e.g. "e - 350",
+    "RT_HALIGN_LEFT | RT_VALIGN_CENTER"), but every hand-written
+    TemplatedMultiContentEx grid-math formula and flags OR-chain in this
+    codebase is written compact ("e-350", "RT_HALIGN_LEFT|RT_VALIGN_CENTER")
+    - strip that spacing back out so the round trip doesn't introduce diff
+    noise."""
+    return FORMULA_OP_RE.sub(r"\1", text)
+
+
+def dedentConvertText(text):
+    """A convert type parseConvertTemplate() doesn't recognize (e.g. this
+    codebase's "COCTemplatedMultiContentEx", which has its own "var" key) is
+    preserved as one opaque text blob - but its captured body can carry
+    whatever absolute indentation the source file happened to have, which
+    looks wrong once yml2xml.py re-embeds it under a tag at a different
+    level, or - if this text was captured from a file xmlpretty.py already
+    ran on once - a leading tab per line (its own external, tag-matching
+    indent, from fix_convert_newlines there). The opening line is always
+    glued straight onto ">" at column 0, so it's excluded from every
+    calculation below; a tab elsewhere is normalized to spaces first so
+    textwrap.dedent()'s (and this function's own) indent math, like
+    YamlParser's, only ever has to reason about one indentation unit.
+
+    Two real input shapes reach here, and they need different treatment:
+      - Hand-authored, never xmlpretty'd: the closing bracket sits at the
+        SAME indent as its sibling keys ("var", "template", ...) - this
+        codebase's own real "COCTemplatedMultiContentEx" convention.
+        dedent()'s common-prefix strips them ALL to column 0 together, so
+        nothing distinguishes the keys from "{" anymore - shift the whole
+        body (except that bracket) one level deeper to restore the nesting.
+      - Already xmlpretty'd once: fix_convert_newlines put the closing
+        bracket at the tag's own (shallower) indent, sibling keys one level
+        deeper - dedent() alone already reproduces exactly that relative
+        structure with nothing further needed; shifting again would double
+        it.
+    The discriminator: after dedenting, does any OTHER top-level line also
+    sit at column 0? If so it's the first (hand-authored) case; if the
+    closing bracket is the only column-0 line, it's already correct."""
+    if "\n" not in text:
+        return text
+    first, rest = text.split("\n", 1)
+    lines = textwrap.dedent(rest.replace("\t", "    ")).split("\n")
+
+    def indentOf(line):
+        return len(line) - len(line.lstrip(" "))
+
+    if lines and lines[-1].strip() in {"}", "]", ")"} and indentOf(lines[-1]) == 0:
+        closing = lines.pop().strip()
+        if any(line.strip() and indentOf(line) == 0 for line in lines):
+            lines = [f"    {line}" if line.strip() else line for line in lines]
+        lines.append(closing)
+    return f"{first}\n" + "\n".join(lines)
+
+
+class HexInt(int):
+    """An int literal that was actually written in hex in the source (e.g.
+    border_color=0x595959) - a plain int has no memory of which base it was
+    written in, so this carries that forward for renderKwargValue()/
+    yamlScalar() to render back the same way, rather than guessing from the
+    kwarg's name (a color that happened to be written in decimal should stay
+    decimal, and a non-color int that happened to be hex should stay hex)."""
+
+
+def exprToValue(node, text=None):
     if isinstance(node, ast.Call):
         result = {"call": node.func.id}
         if node.args:
-            result["args"] = [exprToValue(a) for a in node.args]
+            result["args"] = [exprToValue(a, text) for a in node.args]
         if node.keywords:
-            result["kwargs"] = {kw.arg: exprToValue(kw.value) for kw in node.keywords}
+            result["kwargs"] = {kw.arg: exprToValue(kw.value, text) for kw in node.keywords}
         return result
     if isinstance(node, ast.Constant):
-        return node.value
+        value = node.value
+        if (text is not None and isinstance(value, int) and not isinstance(value, bool)):
+            segment = ast.get_source_segment(text, node)
+            if segment and segment.strip().lower().startswith("0x"):
+                return HexInt(value)
+        return value
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant):
         return -node.operand.value
     if isinstance(node, (ast.Tuple, ast.List)):
-        return [exprToValue(e) for e in node.elts]
+        return [exprToValue(e, text) for e in node.elts]
     if isinstance(node, ast.Name):
         return RawExpr(node.id)
-    return RawExpr(ast.unparse(node))  # e.g. flags OR-chains, "e - 485" grid math
+    return RawExpr(compactFormula(ast.unparse(node)))  # e.g. flags OR-chains, "e-485" grid math
+
+
+def parseVarTuple(node):
+    """"var": (ih := 70, hspace := 10, ...) - a tuple of walrus-bound local
+    variables some plugins (e.g. TimeshiftCockpit) declare ahead of
+    "template" and then reference throughout its pos=/size= expressions.
+    Returns an ordered list of "name := expr" strings (order matters - a
+    later binding can reference an earlier one by name) if `node` matches
+    that exact shape, else None so the caller falls back to raw text rather
+    than force-fitting something else. ast.unparse() on just elt.value (not
+    the whole NamedExpr) reproduces the original expression with no
+    spurious wrapping parens - verified separately against this exact
+    real-world tuple."""
+    if not isinstance(node, ast.Tuple):
+        return None
+    result = []
+    for elt in node.elts:
+        if not isinstance(elt, ast.NamedExpr) or not isinstance(elt.target, ast.Name):
+            return None
+        result.append(f"{elt.target.id} := {compactFormula(ast.unparse(elt.value))}")
+    return result
 
 
 def parseConvertTemplate(text):
-    """Returns a dict body (fonts/template/itemHeight/...) if `text` is a
-    TemplatedMultiContent(Ex) dict literal, else None (plain text convert)."""
+    """Returns a dict body (var/fonts/template/itemHeight/...) if `text` is
+    a TemplatedMultiContent(Ex) dict literal, else None (plain text
+    convert)."""
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError:
@@ -206,9 +327,18 @@ def parseConvertTemplate(text):
         return None
     top = {}
     for key_node, value_node in zip(tree.body.keys, tree.body.values):
-        if not isinstance(key_node, ast.Constant) or key_node.value not in TEMPLATE_KEYS:
+        if not isinstance(key_node, ast.Constant):
+            return None
+        key = key_node.value
+        if key == "var":
+            var_list = parseVarTuple(value_node)
+            if var_list is None:
+                return None  # unexpected "var" shape - leave as plain text
+            top["var"] = var_list
+            continue
+        if key not in TEMPLATE_KEYS:
             return None  # not our template shape - leave as plain text
-        top[key_node.value] = exprToValue(value_node)
+        top[key] = exprToValue(value_node, text)
     if "template" not in top:
         return None
     return top
@@ -224,9 +354,17 @@ def parseConvertTemplate(text):
 # TVMagazineCockpit/Index.py's `idx` dict) this tool has no way to discover.
 # ---------------------------------------------------------------------------
 
-TEXT_REQUIRED_KWARGS = {"pos", "size", "font", "flags", "text"}
-TEXT_ALLOWED_KWARGS = TEXT_REQUIRED_KWARGS | {"color", "color_sel"}
+TEXT_REQUIRED_KWARGS = {"pos", "size", "flags", "text"}
+TEXT_OPTIONAL_KWARGS = {"font", "color", "color_sel"}
+TEXT_ALLOWED_KWARGS = TEXT_REQUIRED_KWARGS | TEXT_OPTIONAL_KWARGS
 ICON_REQUIRED_KWARGS = {"pos", "size", "png", "flags"}
+ICON_ALLOWED_KWARGS = ICON_REQUIRED_KWARGS | {"backcolor"}
+# MultiContentEntryPixmapAlphaTest is otherwise identical to the far more
+# common ...AlphaBlend - the value here is the "variant:" a field carries to
+# tell them back apart on the way to XML, None for the common case (left
+# unmarked in the domain field, matching e.g. border_width only ever being
+# present when relevant).
+ICON_CALLS = {"MultiContentEntryPixmapAlphaBlend": None, "MultiContentEntryPixmapAlphaTest": "AlphaTest"}
 PROGRESS_REQUIRED_KWARGS = {"pos", "size", "percent"}
 PROGRESS_ALLOWED_KWARGS = PROGRESS_REQUIRED_KWARGS | {
     "borderWidth", "foreColor", "foreColorSelected", "backColor"}
@@ -234,7 +372,16 @@ BORDER_TEXT_KWARGS = {"pos", "size", "font", "flags", "text", "border_width", "b
 
 
 def resolveFontIndex(fonts, index):
-    family, size = fonts[index]["args"]
+    """Returns "Family;Size" for a fonts[index] that's a plain two-arg
+    gFont(family, size) call, else None - some plugins (e.g. TheraphosaCockpit)
+    use parseFont("Family;Size") or other single-arg helpers instead, which
+    this domain-schema shape has no way to represent; callers must fall back
+    to "raw" rather than assume the two-arg shape and crash."""
+    entry = fonts[index]
+    args = entry.get("args", [])
+    if entry.get("call") != "gFont" or len(args) != 2:
+        return None
+    family, size = args
     return f"{family};{size}"
 
 
@@ -254,18 +401,32 @@ def toDomainField(entry, fonts):
 
     if (not has_args and call == "MultiContentEntryText"
             and TEXT_REQUIRED_KWARGS <= keys <= TEXT_ALLOWED_KWARGS):
-        field = {
-            "rect": mergeRect(kwargs), "font": resolveFontIndex(fonts, kwargs["font"]),
-            "flags": kwargs["flags"], "value": kwargs["text"],
-        }
-        for k in ("color", "color_sel"):
-            if k in kwargs:
-                field[k] = kwargs[k]
-        return "text", field
+        # font= is itself optional in the source (enigma2 defaults it when
+        # omitted, e.g. TimeshiftCockpit's screenpart_TimeshiftOverviewList)
+        # - only resolve/require it when the call actually has one; an
+        # unresolvable font (present but not a plain gFont(family, size))
+        # still falls back to raw, same as before.
+        font = resolveFontIndex(fonts, kwargs["font"]) if "font" in kwargs else None
+        if "font" not in kwargs or font is not None:
+            field = {"rect": mergeRect(kwargs)}
+            if font is not None:
+                field["font"] = font
+            field["flags"] = kwargs["flags"]
+            field["value"] = kwargs["text"]
+            for k in ("color", "color_sel"):
+                if k in kwargs:
+                    field[k] = kwargs[k]
+            return "text", field
 
-    if (not has_args and call == "MultiContentEntryPixmapAlphaBlend"
-            and keys == ICON_REQUIRED_KWARGS):
-        return "icon", {"rect": mergeRect(kwargs), "flags": kwargs["flags"], "value": kwargs["png"]}
+    if (not has_args and call in ICON_CALLS
+            and ICON_REQUIRED_KWARGS <= keys <= ICON_ALLOWED_KWARGS):
+        field = {"rect": mergeRect(kwargs), "flags": kwargs["flags"], "value": kwargs["png"]}
+        variant = ICON_CALLS[call]
+        if variant:
+            field["variant"] = variant
+        if "backcolor" in kwargs:
+            field["backcolor"] = kwargs["backcolor"]
+        return "icon", field
 
     if (not has_args and call == "MultiContentEntryProgress"
             and PROGRESS_REQUIRED_KWARGS <= keys <= PROGRESS_ALLOWED_KWARGS):
@@ -275,6 +436,17 @@ def toDomainField(entry, fonts):
                 field[k] = kwargs[k]
         return "progress", field
 
+    # A raw entry's "font" kwarg is a plain index into the enclosing
+    # template's fonts list - meaningless on its own once separated from
+    # that list. Inline the actual font-call definition it points to so the
+    # raw entry is fully self-contained (renderKwargValue/renderFlow already
+    # know how to render a call-shaped kwarg value); toDomainCell() also
+    # keeps the fonts list itself around verbatim, so this is purely a
+    # readability convenience for the raw field, not that field's only tie
+    # back to its font.
+    font_idx = kwargs.get("font")
+    if isinstance(font_idx, int) and not isinstance(font_idx, bool) and 0 <= font_idx < len(fonts):
+        entry = {**entry, "kwargs": {**kwargs, "font": fonts[font_idx]}}
     return "raw", entry
 
 
@@ -293,10 +465,13 @@ def detectBorder(entries, fonts):
             or kwargs.get("text") != ""
             or list(kwargs.get("pos", [])) != [0, 0]):
         return None, None, entries
+    font = resolveFontIndex(fonts, kwargs["font"])
+    if font is None:
+        return None, None, entries
     border = {
         "width": kwargs["border_width"],
         "color": kwargs["border_color"],
-        "font": resolveFontIndex(fonts, kwargs["font"]),
+        "font": font,
         "flags": kwargs["flags"],
     }
     return border, kwargs["size"][0], entries[1:]
@@ -307,6 +482,8 @@ def toDomainCell(body):
     entries = body["template"]
 
     cell = {}
+    if "var" in body:
+        cell["vars"] = body["var"]
     if "itemHeight" in body:
         cell["itemHeight"] = body["itemHeight"]
     for key in ("itemWidth", "selectionEnabled", "scrollbarMode", "orientation"):
@@ -321,6 +498,17 @@ def toDomainCell(body):
     cell["fields"] = [
         {kind: field} for kind, field in (toDomainField(entry, fonts) for entry in entries)
     ]
+
+    # fonts[] is kept verbatim, in its original order, regardless of which
+    # (if any) entries end up referencing each slot - font=N in a template
+    # is a POSITIONAL reference, so silently dropping or renumbering an
+    # entry (even one nothing currently points to) would be a real change,
+    # not just a cosmetic one: anything that referenced it by that number
+    # from outside this one <convert> block would now point at the wrong
+    # font, or a font that no longer exists.
+    if fonts:
+        cell["fonts"] = fonts
+
     return cell
 
 
@@ -359,10 +547,16 @@ def stripEval(value):
 def yamlScalar(value):
     if isinstance(value, RawExpr):
         return str(value)
+    if value is None:
+        return "null"
+    if isinstance(value, HexInt):
+        return f"0x{value:06x}"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        escaped = (value.replace("\\", "\\\\").replace('"', '\\"')
+                   .replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
+        return '"' + escaped + '"'
     return str(value)
 
 
@@ -395,14 +589,7 @@ def renderCallBlock(node, indent, lines):
             lines.append(f"{prefix}{INDENT}{INDENT}{k}: {renderKwargValue(k, v)}")
 
 
-def renderKwargValue(key, value):
-    # Cosmetic only: a *Color*/*colour* kwarg holding a non-negative int came
-    # from a hex literal in every real template in this codebase (colors are
-    # never meaningfully decimal) - render it back as hex for readability,
-    # even though Python's int has no memory of which base it was written in.
-    if (isinstance(value, int) and not isinstance(value, bool)
-            and value >= 0 and "color" in key.lower()):
-        return f"0x{value:06x}"
+def renderKwargValue(_key, value):
     if isinstance(value, list):
         return renderFlow(value)
     if isinstance(value, dict) and "call" in value:
@@ -444,6 +631,10 @@ def renderDomainField(kind, field, indent, lines):
 
 def renderDomainCell(cell, indent, lines):
     prefix = INDENT * indent
+    if "vars" in cell:
+        lines.append(f"{prefix}vars:")
+        for v in cell["vars"]:
+            lines.append(f'{INDENT * (indent + 1)}- {yamlScalar(v)}')
     for key in ("itemHeight", "itemWidth", "width", "selectionEnabled", "scrollbarMode", "orientation"):
         if key in cell:
             lines.append(f"{prefix}{key}: {renderKwargValue(key, cell[key])}")
@@ -451,6 +642,18 @@ def renderDomainCell(cell, indent, lines):
         lines.append(f"{prefix}border:")
         for key, value in cell["border"].items():
             lines.append(f"{prefix}{INDENT}{key}: {renderKwargValue(key, value)}")
+    if "fonts" in cell:
+        lines.append(f"{prefix}fonts:")
+        for font in cell["fonts"]:
+            # A plain two-arg gFont(family, size) renders as the same
+            # "Family;Size" string every font: reference elsewhere in this
+            # schema already uses - call:/args: is only needed as a lossless
+            # fallback for anything else (e.g. parseFont(...)).
+            if font.get("call") == "gFont" and len(font.get("args", [])) == 2:
+                family, size = font["args"]
+                lines.append(f'{INDENT * (indent + 1)}- "{family};{size}"')
+            else:
+                renderCallBlock(font, indent + 1, lines)
     lines.append(f"{prefix}fields:")
     dash_indent = indent + 1
     for item in cell["fields"]:
@@ -459,10 +662,27 @@ def renderDomainCell(cell, indent, lines):
         renderDomainField(kind, field, dash_indent + 2, lines)
 
 
-def renderAttrs(attrs, indent, lines):
+def toYmlIncFile(filename):
+    """An <xmlinc file="..."> reference is written against the XML dialect
+    (xmlinc.py's own default-extension logic assumes ".xmlinc"), but once
+    spliced into the YAML side it needs to point at that fragment's .yml
+    counterpart instead, or a tool walking the YAML tree (e.g. tools/
+    retrieveymlincs.py) would go looking for a file that was never
+    generated. Mirrors deriveOutFile()'s whole-file mapping, just applied to
+    one attribute value instead of the file being converted as a whole."""
+    if filename.endswith(".noxmlinc"):
+        return filename[: -len(".noxmlinc")] + ".noymlinc"
+    if filename.endswith(".xmlinc"):
+        return filename[: -len(".xmlinc")] + ".ymlinc"
+    return filename  # bare name (no extension) - xmlinc.py's own default applies either way
+
+
+def renderAttrs(tag, attrs, indent, lines):
     prefix = INDENT * indent
     for k, v in attrs.items():
-        lines.append(f'{prefix}{k}: "{stripEval(v)}"')
+        if tag == "xmlinc" and k == "file":
+            v = toYmlIncFile(v)
+        lines.append(f'{prefix}{k}: {yamlScalar(stripEval(v))}')
 
 
 def renderBody(tag, attrs, children, text, body_indent, lines):
@@ -482,14 +702,27 @@ def renderBody(tag, attrs, children, text, body_indent, lines):
     if tag == "convert" and text:
         template = parseConvertTemplate(text)
         if template is not None:
-            lines.append(f'{INDENT * body_indent}type: "{attrs.get("type", "")}"')
+            lines.append(f'{INDENT * body_indent}type: {yamlScalar(attrs.get("type", ""))}')
             lines.append(f"{INDENT * body_indent}cell:")
             renderDomainCell(toDomainCell(template), body_indent + 1, lines)
             return
 
-    renderAttrs(attrs, body_indent, lines)
+    renderAttrs(tag, attrs, body_indent, lines)
     if text is not None:
-        lines.append(f'{INDENT * body_indent}text: "{text}"')
+        value = dedentConvertText(text) if tag == "convert" else text
+        if "\n" in value:
+            # A literal block scalar, not yamlScalar()'s single-line
+            # \n/\t-escaped quoted form - that form is unreadable at any
+            # real size (this codebase's own raw-preserved convert bodies,
+            # e.g. "COCTemplatedMultiContentEx", can run to 20+ lines) and
+            # needs no escaping at all here since "|" preserves content
+            # literally, quotes included.
+            lines.append(f"{INDENT * body_indent}text: |")
+            block_prefix = INDENT * (body_indent + 1)
+            for line in value.split("\n"):
+                lines.append(f"{block_prefix}{line}" if line else "")
+        else:
+            lines.append(f'{INDENT * body_indent}text: {yamlScalar(value)}')
     elif children:
         lines.append(f"{INDENT * body_indent}children:")
         dash_indent = body_indent + 1
@@ -502,7 +735,22 @@ def renderBody(tag, attrs, children, text, body_indent, lines):
 
 
 def xml2yml(text):
-    tag, attrs, children, text_content = XmlParser(text).parseDocument()
+    result = XmlParser(text).parseDocument()
+    if isinstance(result, list):
+        # More than one top-level sibling (see parseDocument()'s docstring)
+        # - same "- tag:" dash-list shape renderBody already uses for a
+        # element's own <children>, just at the document's own top level
+        # instead of under a "children:" key, so there's nothing above the
+        # dashes to indent relative to.
+        lines = []
+        for item in result:
+            if item.comment:
+                lines.append(f"# {item.comment}")
+            tag, attrs, children, text_content = item.value
+            lines.append(f"- {tag}:")
+            renderBody(tag, attrs, children, text_content, 2, lines)
+        return "\n".join(lines) + "\n"
+    tag, attrs, children, text_content = result
     lines = [f"{tag}:"]
     renderBody(tag, attrs, children, text_content, 1, lines)
     return "\n".join(lines) + "\n"
@@ -532,10 +780,18 @@ def main(argv):
     print("src in file: " + args.srcinfile)
     print("src out file: " + srcoutfile)
 
+    if not os.path.isfile(args.srcinfile):
+        # readFile() already prints the OS-level reason (e.g. "No such file
+        # or directory") and returns "" rather than raising, so without this
+        # check xml2yml() would go on to parse empty text and fail with a
+        # confusing IndexError instead of stopping here.
+        print(f"ERROR: source file not found: {args.srcinfile}")
+        sys.exit(1)
+
     output = xml2yml(readFile(args.srcinfile))
     writeFile(srcoutfile, output)
 
-    print("xml2yml done.")
+    # print("xml2yml done.")
 
 
 if __name__ == "__main__":

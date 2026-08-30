@@ -5,7 +5,7 @@
 import os
 import subprocess
 import sys
-import getopt
+import argparse
 import xml.etree.ElementTree as ET
 from Version import VERSION
 
@@ -37,32 +37,20 @@ def process_file(scale, src, dst):
         print(f"process_file: no width in {src}")
 
 
+def parseArgs(argv):
+    parser = argparse.ArgumentParser(prog="svgscale.py")
+    parser.add_argument("-s", "--scale", dest="scale", required=True, help="scaling factor")
+    parser.add_argument("-i", "--src", dest="src", required=True, help="source file")
+    parser.add_argument("-o", "--dst", dest="dst", help="destination file (defaults to source)")
+    return parser.parse_args(argv)
+
+
 def scale_svg(argv):
     print(f"svgscale {VERSION}")
-    scale = ""
-    src = ""
-    dst = ""
-    opts = []
-
-    try:
-        opts, _args = getopt.getopt(argv, "s:i:o:", ["scale=", "src=", "dst="])
-    except getopt.GetoptError as e:
-        print("Error: " + str(e))
-
-    if len(opts) < 3:
-        print('Usage: python svgscale.py -s <scale> -i <src> -o <dst>')
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt in {'-s', '--scale'}:
-            scale = arg
-        elif opt in {'-i', '--src'}:
-            src = os.path.normpath(arg)
-        elif opt in {'-o', '--dst'}:
-            dst = os.path.normpath(arg)
-
-    if not dst:
-        dst = src
+    args = parseArgs(argv)
+    scale = args.scale
+    src = os.path.normpath(args.src)
+    dst = os.path.normpath(args.dst) if args.dst else src
 
     print("scaling svg...")
     print('scale: ' + scale)
@@ -71,7 +59,7 @@ def scale_svg(argv):
 
     process_file(scale, src, dst)
 
-    print("svgscale done.")
+    # print("svgscale done.")
 
 
 if __name__ == "__main__":

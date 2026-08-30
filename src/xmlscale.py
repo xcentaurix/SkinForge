@@ -5,11 +5,10 @@
 import os
 import sys
 import re
-import getopt
-import xml.etree.ElementTree as ET
-# import xml.dom.minidom as minidom
+import argparse
 from fractions import Fraction
 from FileUtils import readFile, writeFile
+from xmlinc import XmlParser, Comment, renderNode
 
 ending_values = ["Width", "Height", "Font", "Offset", "Margin", "HPos"]
 key_values = ["xres", "yres", "lineSpacing", "value", "textX", "textY", "pixmapX", "pixmapY", "separation", "rcheight",
@@ -189,139 +188,64 @@ class XML(Template):
         # print(pointer)
         return pointer
 
-    def addRoot(self, lines):
-        lines = ["<root>"] + lines + ["</root>"]
-        return lines
-
-    def removeRoot(self, lines):
-        olines = []
-        for line in lines:
-            if line and not ("<root>" in line or "</root>" in line or "<?xml" in line):
-                olines.append(line)
-        # print("olines: %s" % olines)
-        return olines
+    def scaleElement(self, scale, node):
+        if isinstance(node, Comment):
+            return
+        # A <convert type="TemplatedMultiContent"> only ever appears inside
+        # a <widget> in this dialect, so its own tag+type is enough to spot
+        # it without needing to check the parent too.
+        if node.tag == "convert" and node.attrs.get("type") == "TemplatedMultiContent":
+            if node.text:
+                node.text = self.scaleTemplate(scale, node.text)
+        else:
+            for key in node.attrs:
+                if key.startswith("column"):
+                    node.attrs[key] = self.scaleColumn(scale, key, node.attrs[key])
+                elif key == "pointer":
+                    node.attrs[key] = self.scalePointer(scale, node.attrs[key])
+                elif key in {"backgroundPixmap", "selectionPixmap"}:
+                    pass
+                else:
+                    node.attrs[key] = self.scaleNumber(scale, key, node.attrs[key])
+            # Reorder attributes alphabetically for consistent output -
+            # renderNode() (xmlinc.py) renders in dict order, so sorting
+            # the dict itself is all that's needed, no post-hoc string pass.
+            node.attrs = dict(sorted(node.attrs.items()))
+        if node.children:
+            for child in node.children:
+                self.scaleElement(scale, child)
 
     def processFile(self, scale, src, dst):
         # print("process_file: scale: %s, src: %s, dst: %s" % (scale, src, dst))
-        lines = readFile(src).splitlines()
-        if os.path.splitext(src)[1] == ".xmlinc":
-            lines = self.addRoot(lines)
-        xml_string = "\n".join(lines)
-        tree = ET.ElementTree(ET.fromstring(xml_string))
-        root = tree.getroot()
-        for node in tree.iter():
-            for elem in node:  # .iter():
-                # print(node.tag, elem.tag)
-                if node.tag == "widget" and elem.tag == "convert" and elem.attrib["type"] == "TemplatedMultiContent":
-                    if elem.text:
-                        elem.text = self.scaleTemplate(scale, elem.text)
-                else:
-                    for key in elem.attrib:
-                        # print("--- ", key, elem.attrib[key])
-                        if key.startswith("column"):
-                            elem.attrib[key] = self.scaleColumn(
-                                scale, key, elem.attrib[key])
-                        elif key == "pointer":
-                            # print(elem.attrib[key])
-                            elem.attrib[key] = self.scalePointer(
-                                scale, elem.attrib[key])
-                        elif key in {"backgroundPixmap", "selectionPixmap"}:
-                            # value = elem.attrib[key]
-                            pass
-                        else:
-                            elem.attrib[key] = self.scaleNumber(
-                                scale, key, elem.attrib[key])
+        root = XmlParser(readFile(src)).parseDocument()
+        # A .xmlinc fragment can have more than one top-level element -
+        # parseDocument() already returns a plain list for that case, no
+        # synthetic <root> wrapper (and matching unwrap afterward) needed.
+        nodes = root if isinstance(root, list) else [root]
 
-        xml_string = ET.tostring(root, encoding="unicode", method="xml")
+        for node in nodes:
+            self.scaleElement(scale, node)
 
-        # Reorder all XML element attributes alphabetically for consistent output
-
-        xml_string = re.sub(
-            r'<(\w+)\s+([^>]*?)/?>',
-            lambda m: self._reorder_attributes_alphabetically(m.group(0)),
-            xml_string
-        )
-
-        # print("xml_string: %s" % xml_string)
-        xml_string = xml_string.replace(" />", "/>")
-        # xml_string = minidom.parseString(xml_string).toprettyxml(indent="\t")
-        lines = [line for line in xml_string.splitlines() if line.split()]
-        # print(lines)
-        if os.path.splitext(src)[1] == ".xmlinc":
-            lines = self.removeRoot(lines)
-        # print(lines)
-        xml_string = "\n".join(lines)
-        xml_string = xml_string.replace("&quot;", '"') + "\n"
-        # print(xml_string)
+        lines = []
+        for node in nodes:
+            renderNode(node, lines)
+        xml_string = "\n".join(lines) + "\n"
         writeFile(dst, xml_string)
 
-    def _reorder_attributes_alphabetically(self, element_tag):
-        """Reorder all element attributes alphabetically for consistent output"""
 
-        # Handle both self-closing tags and opening tags
-        self_closing = element_tag.endswith('/>')
-
-        # Extract tag name and attributes
-        if self_closing:
-            tag_match = re.match(r'<(\w+)\s+([^>]*?)/>', element_tag)
-        else:
-            tag_match = re.match(r'<(\w+)\s+([^>]*?)>', element_tag)
-
-        if not tag_match:
-            return element_tag
-
-        tag_name = tag_match.group(1)
-        attrs_string = tag_match.group(2) if tag_match.group(2) else ""
-
-        # Extract all attributes
-        attrs = {}
-        attr_pattern = r'(\w+)="([^"]*)"'
-
-        for match in re.finditer(attr_pattern, attrs_string):
-            attr_name, attr_value = match.groups()
-            attrs[attr_name] = attr_value
-
-        # Build the reordered tag with alphabetically sorted attributes
-        result = f'<{tag_name}'
-
-        for attr in sorted(attrs.keys()):
-            result += f' {attr}="{attrs[attr]}"'
-
-        # Preserve self-closing format
-        if self_closing:
-            result += '/>'
-        else:
-            result += '>'
-
-        return result
+def parseArgs(argv):
+    parser = argparse.ArgumentParser(prog="xmlscale.py")
+    parser.add_argument("-s", dest="scale", required=True, help="scaling factor")
+    parser.add_argument("-i", dest="src", required=True, help="source file")
+    parser.add_argument("-o", dest="dst", help="destination file (defaults to source)")
+    return parser.parse_args(argv)
 
 
 def scaleSkin(argv):
-    scale = ""
-    src = ""
-    dst = ""
-    opts = []
-
-    try:
-        opts, _args = getopt.getopt(argv, "s:i:o:", [])
-    except getopt.GetoptError as e:
-        print(f"Error: {e}")
-        sys.exit(2)
-
-    if len(opts) < 3:
-        print('Usage: python xmlscale.py -s <scale> -i <src> -o <dst>')
-        sys.exit(2)
-
-    for opt, arg in opts:
-        if opt == "-s":
-            scale = arg
-        elif opt == "-i":
-            src = os.path.normpath(arg)
-        elif opt == "-o":
-            dst = os.path.normpath(arg)
-
-    if not dst:
-        dst = src
+    args = parseArgs(argv)
+    scale = args.scale
+    src = os.path.normpath(args.src)
+    dst = os.path.normpath(args.dst) if args.dst else src
 
     print("processing skin...")
     scale = float(Fraction(scale))
@@ -334,7 +258,7 @@ def scaleSkin(argv):
     else:
         XML().processFile(scale, src, dst)
 
-    print("xmlscale done.")
+    # print("xmlscale done.")
 
 
 if __name__ == "__main__":
