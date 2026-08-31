@@ -331,13 +331,11 @@ def wrapEval(value):
 
 def toXmlIncFile(filename):
     """Inverse of xml2yml.py's toYmlIncFile(): an <xmlinc file="..."> value
-    read back from the YAML side points at a .ymlinc fragment (or its bare/
-    .noymlinc form), but the compiled XML needs the actual .xmlinc/
-    .noxmlinc file xmlinc.py will look for on disk."""
+    read back from the YAML side points at a .ymlinc fragment, but the
+    compiled XML needs the actual .xmlinc file xmlinc.py will look for on
+    disk."""
     if not isinstance(filename, str):
         return filename
-    if filename.endswith(".noymlinc"):
-        return filename[: -len(".noymlinc")] + ".noxmlinc"
     if filename.endswith(".ymlinc"):
         return filename[: -len(".ymlinc")] + ".xmlinc"
     return filename  # bare name (no extension) - xmlinc.py's own default applies either way
@@ -695,8 +693,6 @@ def yml2xml(text, is_full_document):
 
 
 def deriveOutFile(srcinfile):
-    if srcinfile.endswith(".noymlinc"):
-        return srcinfile[: -len(".noymlinc")] + ".noxmlinc"
     if srcinfile.endswith(".ymlinc"):
         return srcinfile[: -len(".ymlinc")] + ".xmlinc"
     if srcinfile.endswith(".yml"):

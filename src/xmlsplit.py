@@ -54,7 +54,7 @@ def xmlsplit(src):
                     continue
                 filename = comp.tag + "_" + comp.attrib["type"]
                 save_element_to_file(comp, filename, srcdir)
-                skinlines.append(f'<xmlinc file="{filename}"/>')
+                skinlines.append(f'<xmlinc file="{filename}.xmlinc"/>')
             skinlines.append("</components>")
         elif node.tag == "layouts":
             skinlines.append("<layouts>")
@@ -64,19 +64,19 @@ def xmlsplit(src):
                     continue
                 filename = comp.tag + "_" + comp.attrib["name"]
                 save_element_to_file(comp, filename, srcdir)
-                skinlines.append(f'<xmlinc file="{filename}"/>')
+                skinlines.append(f'<xmlinc file="{filename}.xmlinc"/>')
             skinlines.append("</layouts>")
         elif node.tag in {"windowstyle", "windowstylescrollbar"}:
             filename = node.tag + "_" + node.attrib["id"]
             save_element_to_file(node, filename, srcdir)
-            skinlines.append(f'<xmlinc file="{filename}"/>')
+            skinlines.append(f'<xmlinc file="{filename}.xmlinc"/>')
         else:
             if "name" in node.attrib:
                 filename = node.tag + "_" + node.attrib["name"]
             else:
                 filename = node.tag
             save_element_to_file(node, filename, srcdir)
-            skinlines.append(f'<xmlinc file="{filename}"/>')
+            skinlines.append(f'<xmlinc file="{filename}.xmlinc"/>')
     skinlines.append("</skin>")
     skin = "\n".join(skinlines)
     writeFile(src, skin)

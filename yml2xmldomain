@@ -7,11 +7,11 @@ if [ -z "$domain" ]; then
 fi
 
 skin="${2:-default}"
-
-git="${PWD%$domain*}$domain"
+base="${3:-$HOME/git/dev}"
+git="$base/$domain"
 echo git: $git
 
-for file in $git/src/skin/$skin/*.*yml*; do
+for file in $git/src/skin/*.*yml* $git/src/skin/$skin/*.*yml*; do
 	if [ -f "$file" ]; then
 		echo "Processing $file..."
 		python "$(dirname "$0")"/src/yml2xml.py -i "$file"

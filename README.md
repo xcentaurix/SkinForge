@@ -10,26 +10,109 @@ SkinForge doesn't change what enigma2 itself understands — it compiles a riche
 
 Both share the same compiler and the same `Common` directory of reusable building blocks (buttons, title bars, colors, ...) — YAML source is simply converted to XML+ first, then compiled the same way. Pick whichever fits how a given plugin is currently authored; neither is deprecated, and there's no need to migrate an existing XML+ skin just to use SkinForge.
 
+## YAML skin example
+
+The following YAML screen source describes this screen:
+
+![Screenshot](pic1.jpg)
+
+Note: Only the first and last of the 2 x 6 repeating widgets are shown.
+
+```yaml
+screen:
+  backgroundColor: "panelBG"
+  flags: "wfNoBorder"
+  name: "ProgramColumns"
+  position: "center,center"
+  resolution: "1920,1080"
+  size: "1920,1080"
+  children:
+
+    # title bar
+    - xmlinc:
+        file: "screenpart_TitleBar.ymlinc"
+
+     # day selector
+    - widget:
+        font: "$FR_verysmall"
+        halign: "right"
+        name: "day_selector"
+        position: "1490,15"
+        size: "420,26"
+        transparent: "1"
+        valign: "center"
+        zPosition: "2"
+
+    # 6 identical screen parts showing the prime time information
+    - xmlinc:
+        file: "screenpart_PrimeCell.ymlinc"
+        index: "0"
+        position: "0*$screen_width/6,0"
+
+    ...
+
+    - xmlinc:
+        file: "screenpart_PrimeCell.ymlinc"
+        index: "5"
+        position: "5*$screen_width/6,0"
+
+    # 6 identical event lists
+    - widget:
+        backgroundColorSelected: "keyBlue"
+        enableWrapAround: "1"
+        position: "0,275"
+        render: "Listbox"
+        scrollbarMode: "showNever"
+        size: "320,750"
+        source: "list0"
+        transparent: "1"
+        children:
+          - xmlinc:
+              file: "screenpart_EventCell.ymlinc"
+
+    ...
+
+    - widget:
+        backgroundColorSelected: "keyBlue"
+        enableWrapAround: "1"
+        position: "1600,275"
+        render: "Listbox"
+        scrollbarMode: "showNever"
+        size: "320,750"
+        source: "list5"
+        transparent: "1"
+        children:
+          - xmlinc:
+              file: "screenpart_EventCell.ymlinc"
+
+    # button bar
+    - xmlinc:
+        file: "screenpart_ButtonBar.ymlinc"
+        position: "0,$screen_height-48"
+```
+
 ## Quick start
 
 For a plugin whose skin source is written in YAML:
 ```
-ymlcompile <domain>
+ymlcompile <domain> [srcbase] [dstbase] [cmnbase]
 ```
 For a plugin whose skin source is written in XML+:
 ```
-xmlcompile <domain>
+xmlcompile <domain> [srcbase] [dstbase] [cmnbase]
 ```
-`<domain>` is a plugin name (resolved the same way `getdomain` resolves it elsewhere in this toolset) or `.` for the current directory. Either command, run from anywhere:
+`<domain>` is a plugin name (resolved the same way `getdomain` resolves it elsewhere in this toolset) or `.` for the current directory. The base-path arguments are optional and independently default to `$HOME/git/dev`, `$HOME/git/rel`, and `$HOME/git/dev` — pass them to build against a different checkout (e.g. a worktree) without touching `$HOME/git`. `srcbase` roots the plugin's own source, `dstbase` the destination tree, and `cmnbase` the shared `Common` tree.
 
-- walks every skin variant under `$HOME/git/dev/<domain>/src/skin/*` (`default`, `SimpleTenEighty`, `MetrixHD`, ...),
-- (`ymlcompile` only) converts any `*.yml`/`*.ymlinc`/`*.noymlinc` source that changed — in both the plugin's own tree and the shared `Common` tree — to XML+ via `yml2xmldomain`/`xml2ymldomain` and reformats it via `xmlprettydomain`,
-- compiles the result with `xmlinc` against `$HOME/git/dev/Common`, and
+Either command, run from anywhere:
+
+- walks every skin variant under `<srcbase>/<domain>/src/skin/*` (`default`, `SimpleTenEighty`, `MetrixHD`, ...),
+- (`ymlcompile` only) converts any `*.yml`/`*.ymlinc` source that changed — in both the plugin's own tree and the shared `Common` tree — to XML+ via `yml2xmldomain`/`xml2ymldomain` and reformats it via `xmlprettydomain`,
+- compiles the result with `xmlinc` against `<cmnbase>/Common`, and
 - reformats the compiled output with `xmlpretty`,
 
-writing the final, flat XML enigma2 loads to `$HOME/git/rel/<domain>/src/skin/<variant>/skin.xml`. Only variants that already have a `skin.xml` checked into the destination tree are compiled, and (for `ymlcompile`) only ones whose source actually changed get reconverted — both commands are safe to run repeatedly as part of a normal build.
+writing the final, flat XML enigma2 loads to `<dstbase>/<domain>/src/skin/<variant>/skin.xml`. Only variants that already have a `skin.xml` checked into the destination tree are compiled, and (for `ymlcompile`) only ones whose source actually changed get reconverted — both commands are safe to run repeatedly as part of a normal build.
 
-`yml2xmldomain`, `xml2ymldomain`, and `xmlprettydomain` are the per-domain building blocks `ymlcompile` itself calls — each takes `<domain-or-.> [skin]` (`skin` defaults to `default`) and processes just that one variant's files. Use them directly when you want to convert or reformat a single variant without running a full compile.
+`yml2xmldomain`, `xml2ymldomain`, and `xmlprettydomain` are the per-domain building blocks `ymlcompile` itself calls — each takes `<domain-or-.> [skin] [base]` (`skin` defaults to `default`, `base` to `$HOME/git/dev`) and processes just that one variant's files. Use them directly when you want to convert or reformat a single variant without running a full compile.
 
 ## Authoring in YAML
 
@@ -46,7 +129,7 @@ xml2yml <source .xml/.xmlinc file> <destination .yml/.ymlinc file>   # XML+ -> Y
 
 - An element `<tag attr="val">...children...</tag>` becomes `{tag: {attr: "val", ..., children: [...]}}`.
 - A standalone `<!-- comment -->` before a child element becomes a standalone `# comment` right before the matching list item (and back).
-- A document with more than one top-level element — a real possibility for a `.xmlinc`/`.noxmlinc` *fragment* (spliced into a parent by literal text substitution, so it isn't required to have a single root the way a real XML document is) — becomes a top-level `- tag: {...}` dash list instead of the usual single `tag: {...}` mapping, the same shape a `children:` list already uses:
+- A document with more than one top-level element — a real possibility for a `.xmlinc` *fragment* (spliced into a parent by literal text substitution, so it isn't required to have a single root the way a real XML document is) — becomes a top-level `- tag: {...}` dash list instead of the usual single `tag: {...}` mapping, the same shape a `children:` list already uses:
   ```yaml
   - eLabel: {backgroundColor: "separator", position: "0,e-56", size: "e,2"}
   - eLabel: {backgroundColor: "barBG", position: "0,e-55", size: "e,55"}

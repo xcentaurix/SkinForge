@@ -8,7 +8,46 @@ import os
 import re
 import sys
 from FileUtils import readFile, writeFile
-from Pos import Pos
+
+
+def toInt(s):
+    try:
+        i = int(s)
+    except Exception:
+        i = s
+    return i
+
+
+def addMix(v1, v2):
+    v1 = toInt(v1)
+    v2 = toInt(v2)
+    if isinstance(v1, str):
+        r = v1
+    elif isinstance(v2, str):
+        r = v2
+    else:
+        return v1 + v2
+    print(f"==> addMix: ERROR: cannot add non-numeric position values {v1!r} + {v2!r}, keeping {r!r}")
+    return r
+
+
+class Pos():
+    def __init__(self, x, y=0):
+        if isinstance(x, str):
+            if "," in x:
+                pos_string = x.split(",")
+                x = pos_string[0]
+                y = pos_string[1]
+        self.x = toInt(x)
+        self.y = toInt(y)
+
+    def __add__(self, other):
+        new_x = addMix(self.x, other.x)
+        new_y = addMix(self.y, other.y)
+        return Pos(new_x, new_y)
+
+    def __str__(self):
+        return f"{self.x},{self.y}"
 
 
 # Base color names defined by the device's own GUI skin (e.g. MetrixHD's
@@ -366,10 +405,7 @@ class XMLInclude:
             if not isinstance(n, Element):
                 continue
             if "position" in n.attrs and n.attrs["position"] != "fill":
-                # Pos has no __str__ - build the string from .x/.y directly,
-                # same as the original's updatePositions() did.
-                new_pos = pos + Pos(n.attrs["position"])
-                n.attrs["position"] = f"{new_pos.x},{new_pos.y}"
+                n.attrs["position"] = str(pos + Pos(n.attrs["position"]))
             if n.children:
                 self.offsetPositions(n.children, pos)
 

@@ -6,12 +6,14 @@ if [ -z "$domain" ]; then
 fi
 echo "Domain: $domain"
 
-git=$HOME/git
-srcroot=$git/dev/$domain
-dstroot=$git/rel/$domain
+srcbase="${2:-$HOME/git/dev}"
+dstbase="${3:-$HOME/git/rel}"
+cmnbase="${4:-$HOME/git/dev}"
+srcroot=$srcbase/$domain
+dstroot=$dstbase/$domain
 srcskin=$srcroot/src/skin
 dstskin=$dstroot/src/skin
-cmnroot=$git/dev/Common
+cmnroot=$cmnbase/Common
 cmnskin=$cmnroot/src/skin
 
 scriptdir=$(dirname "$0")
@@ -30,20 +32,20 @@ for file in "$dstskin/"*; do
 	else
 		echo "skin: $skin"
 
-		# convert yml to xml if a *.ymlinc or *.noymlinc changed in cmn for this variant
-		if [ -n "$(git -C "$cmnroot" status --porcelain -- "src/skin/$skin/*.ymlinc" "src/skin/$skin/*.noymlinc" 2>/dev/null)" ]; then
+		# convert yml to xml if a *.ymlinc changed in cmn for this variant
+		if [ -n "$(git -C "$cmnroot" status --porcelain -- "src/skin/*.ymlinc" "src/skin/$skin/*.ymlinc" 2>/dev/null)" ]; then
 			echo "cmn yml changed, reconverting..."
-			(cd "$cmnroot" && "$scriptdir/yml2xmldomain" . "$skin")
-			(cd "$cmnroot" && "$scriptdir/xmlprettydomain" . "$skin")
+			(cd "$cmnroot" && "$scriptdir/yml2xmldomain" . "$skin" "$cmnbase")
+			(cd "$cmnroot" && "$scriptdir/xmlprettydomain" . "$skin" "$cmnbase")
 		else
 			echo "cmn yml unchanged, skipping conversion"
 		fi
 
-		# convert yml to xml if a *.ymlinc or *.noymlinc changed in src for this variant
-		if [ -n "$(git -C "$srcroot" status --porcelain -- "src/skin/$skin/*.ymlinc" "src/skin/$skin/*.noymlinc" 2>/dev/null)" ]; then
+		# convert yml to xml if a *.ymlinc changed in src for this variant
+		if [ -n "$(git -C "$srcroot" status --porcelain -- "src/skin/*.ymlinc" "src/skin/$skin/*.ymlinc" 2>/dev/null)" ]; then
 			echo "src yml changed, reconverting..."
-			(cd "$srcroot" && "$scriptdir/yml2xmldomain" . "$skin")
-			(cd "$srcroot" && "$scriptdir/xmlprettydomain" . "$skin")
+			(cd "$srcroot" && "$scriptdir/yml2xmldomain" . "$skin" "$srcbase")
+			(cd "$srcroot" && "$scriptdir/xmlprettydomain" . "$skin" "$srcbase")
 		else
 			echo "src yml unchanged, skipping conversion"
 		fi

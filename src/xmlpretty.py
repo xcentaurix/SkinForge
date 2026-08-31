@@ -33,7 +33,7 @@ def remove_root(ilines):
 def process_file(src_file, dst_file):
     print(f"process_file: {src_file}")
     lines = readFile(src_file).splitlines()
-    if os.path.splitext(src_file)[1] in {".xmlinc", ".noxmlinc"}:
+    if os.path.splitext(src_file)[1] == ".xmlinc":
         lines = add_root(lines)
     xml_string = "\n".join(lines)
     tree = ET.ElementTree(ET.fromstring(xml_string))
@@ -118,7 +118,7 @@ def process_file(src_file, dst_file):
         print(f"failed to process {src_file}: {e}")
         return
     lines = [line for line in xml_string.splitlines() if line.split()]
-    if os.path.splitext(src_file)[1] in {".xmlinc", ".noxmlinc"}:
+    if os.path.splitext(src_file)[1] == ".xmlinc":
         lines = remove_root(lines)
     xml_string = "\n".join(lines)
     xml_string = xml_string.replace("&quot;", '"')
@@ -346,9 +346,7 @@ def xmlpretty(argv):
     src = os.path.normpath(args.src)
     dst = os.path.normpath(args.dst) if args.dst else src
 
-    print("prettifying...")
-    print('src file: ' + src)
-    print('dst file: ' + dst)
+    print('xmlpretty: ' + src + " > " + dst)
 
     process_file(src, dst)
 

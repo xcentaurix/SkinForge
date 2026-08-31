@@ -6,10 +6,15 @@ if [ -z "$domain" ]; then
 fi
 echo "Domain: $domain"
 
-git=$HOME/git
-srcskin=$git/dev/$domain/src/skin
-dstskin=$git/rel/$domain/src/skin
-cmnskin=$git/dev/Common/src/skin
+srcbase="${2:-$HOME/git/dev}"
+dstbase="${3:-$HOME/git/rel}"
+cmnbase="${4:-$HOME/git/dev}"
+srcroot=$srcbase/$domain
+dstroot=$dstbase/$domain
+srcskin=$srcroot/src/skin
+dstskin=$dstroot/src/skin
+cmnroot=$cmnbase/Common
+cmnskin=$cmnroot/src/skin
 
 scriptdir=$(dirname "$0")
 

@@ -670,8 +670,6 @@ def toYmlIncFile(filename):
     retrieveymlincs.py) would go looking for a file that was never
     generated. Mirrors deriveOutFile()'s whole-file mapping, just applied to
     one attribute value instead of the file being converted as a whole."""
-    if filename.endswith(".noxmlinc"):
-        return filename[: -len(".noxmlinc")] + ".noymlinc"
     if filename.endswith(".xmlinc"):
         return filename[: -len(".xmlinc")] + ".ymlinc"
     return filename  # bare name (no extension) - xmlinc.py's own default applies either way
@@ -757,8 +755,6 @@ def xml2yml(text):
 
 
 def deriveOutFile(srcinfile):
-    if srcinfile.endswith(".noxmlinc"):
-        return srcinfile[: -len(".noxmlinc")] + ".noymlinc"
     if srcinfile.endswith(".xmlinc"):
         return srcinfile[: -len(".xmlinc")] + ".ymlinc"
     if srcinfile.endswith(".xml"):
