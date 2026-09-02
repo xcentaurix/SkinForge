@@ -1,0 +1,19 @@
+#!/bin/bash
+domain=$(getdomain "$1")
+echo "Domain: $domain"
+if [ -z "$domain" ]; then
+	echo "Error: not inside a recognized git/dev or git/rel domain directory"
+	exit 1
+fi
+
+skin="${2:-default}"
+base="${3:-$HOME/git/dev}"
+git="$base/$domain"
+echo git: $git
+
+for file in $git/src/skin/*.*zml* $git/src/skin/$skin/*.*zml*; do
+	if [ -f "$file" ]; then
+		echo "Processing $file..."
+		python "$(dirname "$0")"/src/zml2yml.py -i "$file"
+	fi
+done

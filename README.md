@@ -3,12 +3,13 @@
 ## Introduction
 An enigma2 skin is natively just a flat XML file: no includes, no macros, no relative positioning, no variables, no reuse. If you maintain more than one plugin and want a consistent look — or want to change a button style in one place instead of in every `skin.xml` that copy-pasted it — you're stuck hand-editing pixel coordinates in N files at once.
 
-SkinForge doesn't change what enigma2 itself understands — it compiles a richer source down to the plain, flat XML enigma2 actually loads. There are two ways to author that source:
+SkinForge doesn't change what enigma2 itself understands — it compiles a richer source down to the plain, flat XML enigma2 actually loads. There are three ways to author that source:
 
 1. **YAML** — the primary, recommended way to write a skin: a readable YAML dialect (`skin.yml` / `*.ymlinc`) that losslessly round-trips to/from XML+, compiled end-to-end with `ymlcompile`.
 2. **XML+** — the original hierarchical XML dialect (includes, variables, relative positioning, compile-time color/formula checking), kept for backward compatibility and for plugins that already have XML+ source, compiled end-to-end with `xmlcompile`.
+3. **ZAML** (Zenith Advanced Markup Language) — an optional thin layer on top of YAML that adds a `for` loop, for the common case of a screen repeating the same block N times with an index (see [ZAML: Loops on top of YAML](#zaml-zenith-advanced-markup-language-loops-on-top-of-yaml)). Its source keeps the short `.zml`/`.zmlinc` extension, the same way YAML's own is `.yml` rather than `.yaml`, and expands to plain YAML before anything else runs, compiled end-to-end with `zmlcompile`.
 
-Both share the same compiler and the same `Common` directory of reusable building blocks (buttons, title bars, colors, ...) — YAML source is simply converted to XML+ first, then compiled the same way. Pick whichever fits how a given plugin is currently authored; neither is deprecated, and there's no need to migrate an existing XML+ skin just to use SkinForge.
+All three share the same compiler and the same `Common` directory of reusable building blocks (buttons, title bars, colors, ...) — ZAML expands to YAML, which is simply converted to XML+, then compiled the same way. Pick whichever fits how a given plugin is currently authored; neither is deprecated, and there's no need to migrate an existing XML+ skin just to use SkinForge.
 
 ## YAML skin example
 
@@ -101,16 +102,21 @@ For a plugin whose skin source is written in XML+:
 ```
 xmlcompile <domain> [srcbase] [dstbase] [cmnbase]
 ```
+For a plugin whose skin source uses ZAML `for` loops:
+```
+zmlcompile <domain> [srcbase] [dstbase] [cmnbase]
+```
 `<domain>` is a plugin name (resolved the same way `getdomain` resolves it elsewhere in this toolset) or `.` for the current directory. The base-path arguments are optional and independently default to `$HOME/git/dev`, `$HOME/git/rel`, and `$HOME/git/dev` — pass them to build against a different checkout (e.g. a worktree) without touching `$HOME/git`. `srcbase` roots the plugin's own source, `dstbase` the destination tree, and `cmnbase` the shared `Common` tree.
 
 Either command, run from anywhere:
 
 - walks every skin variant under `<srcbase>/<domain>/src/skin/*` (`default`, `SimpleTenEighty`, `MetrixHD`, ...),
+- (`zmlcompile` only) expands any `*.zmlinc` source that changed — in both the plugin's own tree and the shared `Common` tree — to plain YAML via `zml2ymldomain`, then hands off to `ymlcompile` for the remaining steps,
 - (`ymlcompile` only) converts any `*.yml`/`*.ymlinc` source that changed — in both the plugin's own tree and the shared `Common` tree — to XML+ via `yml2xmldomain`/`xml2ymldomain` and reformats it via `xmlprettydomain`,
 - compiles the result with `xmlinc` against `<cmnbase>/Common`, and
 - reformats the compiled output with `xmlpretty`,
 
-writing the final, flat XML enigma2 loads to `<dstbase>/<domain>/src/skin/<variant>/skin.xml`. Only variants that already have a `skin.xml` checked into the destination tree are compiled, and (for `ymlcompile`) only ones whose source actually changed get reconverted — both commands are safe to run repeatedly as part of a normal build.
+writing the final, flat XML enigma2 loads to `<dstbase>/<domain>/src/skin/<variant>/skin.xml`. Only variants that already have a `skin.xml` checked into the destination tree are compiled, and (for `ymlcompile`/`zmlcompile`) only sources that actually changed get reconverted — all three commands are safe to run repeatedly as part of a normal build.
 
 `yml2xmldomain`, `xml2ymldomain`, and `xmlprettydomain` are the per-domain building blocks `ymlcompile` itself calls — each takes `<domain-or-.> [skin] [base]` (`skin` defaults to `default`, `base` to `$HOME/git/dev`) and processes just that one variant's files. Use them directly when you want to convert or reformat a single variant without running a full compile.
 
@@ -195,6 +201,42 @@ cell:
 - `"key": value` object pairs (`itemHeight`, `fonts`, ...) always have a space after the colon.
 - A raw-preserved convert body (one `parseConvertTemplate` doesn't recognize the shape of, e.g. a plugin-specific type with extra top-level keys) still gets its outer indentation normalized — the opening `{`/closing `}` line up with the `<convert>` tag itself, one level deeper for its own keys — without touching a single character of content it doesn't understand.
 
+## ZAML (Zenith Advanced Markup Language): Loops on top of YAML
+
+The YAML dialect above still has no way to say "repeat this six times" — the `screenpart_PrimeCell`/`screenpart_EventCell` blocks in the [YAML skin example](#yaml-skin-example) are unrolled by hand, one list item per index. ZAML adds exactly one construct on top of YAML to remove that repetition: a `for` loop. Nothing else changes — a `.zml`/`.zmlinc` file is ordinary SkinForge YAML with `for` items sprinkled in, and `zml2yml` expands every one of them into plain YAML before `yml2xml`/`xmlinc` ever see the file.
+
+### Syntax
+
+```yaml
+- for:
+    var: "$i"
+    range: [0, 5]
+    body:
+      - xmlinc:
+          file: "screenpart_PrimeCell.ymlinc"
+          index: "$i"
+          position: "$i*$screen_width/6,0"
+```
+
+`var` names the token exactly as it appears in `body` — `"$i"`, dollar sign included — rather than a separate bare name you'd have to mentally re-prefix each time; what you declare is what you'll see used below it (a bare `var: i` without the `$`/quotes still works too, for anything written before this convention). `range: [start, end]` is inclusive, so `[0, 5]` runs six times. `body` is a list, expanded once per iteration and spliced in place of the single `for` item, in order. Inside each copy, every occurrence of `$i` in a string value is replaced by that iteration's plain integer — the same "a `$var` can be embedded inside a literal" rule `xmlinc` itself uses for `$vars` (e.g. `list$i`, `$i*$screen_width/6,0`), not a new substitution mechanism. Nesting a `for` inside another `for`'s `body` works: the outer loop's copies still contain an unexpanded inner `for`, which `zml2yml` expands on its next pass over the file.
+
+A `for` item missing `var`, `range`, or `body` is left untouched in the output rather than silently dropped — `yml2xml`/`xmlinc` don't understand a `for:` key, so a malformed loop fails loudly downstream instead of quietly disappearing.
+
+### Including another `.zmlinc` file
+
+An `<xmlinc file="...">` reference is free to name another `.zmlinc` fragment (one that itself uses `for`) exactly like it would name a `.ymlinc` one — `zml2yml` rewrites `file: "X.zmlinc"` to `file: "X.ymlinc"` in the output, including one found inside an expanded `for` body. This mirrors `yml2xml.py`'s own `file: "X.ymlinc"` → `file="X.xmlinc"` rewrite one layer down (see [Backward compatibility](#backward-compatibility-the-xml-compiler-xmlinc)): by the time `yml2xml`/`xmlinc` run, only the compiled sibling exists on disk, so the reference has to point there rather than at the source fragment. It's a rewrite, not a fetch — the referenced `.zmlinc` file still needs to be expanded in its own right, which `zml2ymldomain` already does for every `.zmlinc` file it finds regardless of who references it.
+
+### What it deliberately doesn't do
+
+ZAML has exactly one construct on purpose. It has no conditionals, no ZAML-level variables separate from `xmlinc`'s existing `$vars`, and no expressions in `range` (both bounds must be literal integers) — anything past repetition is left to `xmlinc`'s own `$var`/`eval(...)` machinery, which already runs on the YAML that `for` expands into. In particular, `$i` embeds into a literal exactly like any other `$var` — including the same ambiguity: `$i` immediately followed by another word character (e.g. `"cell_$i_extra"`) is not distinguishable from a longer variable name and won't be substituted, so use a non-word separator (`"cell-$i-extra"`, or put `$i` at the end of the string) when a loop variable needs to sit next to other text.
+
+### Usage
+
+```
+zmlcompile <domain> [srcbase] [dstbase] [cmnbase]
+```
+Same signature as `ymlcompile` (see [Quick start](#quick-start)). It expands any changed `*.zmlinc` source — in both the plugin's own tree and the shared `Common` tree — to `.yml`/`.ymlinc` via `zml2ymldomain`, then hands off to `ymlcompile` for the rest. `zml2ymldomain` is the per-domain building block it calls, taking `<domain-or-.> [skin] [base]` like `yml2xmldomain` does; use `zml2yml.py -i <file>` directly to expand a single file in isolation.
+
 ## Backward compatibility: the XML+ compiler (`xmlinc`)
 
 `xmlinc` reads a skin source file that mixes ordinary enigma2 XML with a small set of extra constructs, resolves all of it, and writes out a single plain XML file with nothing left in it that enigma2 wouldn't understand natively. This is the original SkinForge authoring language; `xmlcompile` drives it end-to-end for a plugin whose source is written directly in XML+ rather than YAML.
@@ -227,6 +269,7 @@ cell:
   ```
   ERROR: color hilite not defined
   ```
+- **Per-tag defaults** — `<default tag="widget" zPosition="1" transparent="1" .../>` (normally collected from a shared `screenpart_defaults.xmlinc`, the same way colors are) fills in any attribute a `widget` element doesn't set itself; an attribute the element *does* set always wins. This is for a uniform look across plugins — change a value in one shared file instead of on every widget in every screen. Defaults are matched by tag name only (no per-`render`/per-screen targeting) and, like colors, only take effect once the file declaring them has actually been reached via an `<xmlinc>` include — conventionally near the top of `skin.yml`/`skin.xml`, alongside `screenpart_colors`/`screenpart_fonts`. A `<default>` element itself never appears in the compiled output.
 - **Formula evaluation** — `eval(...)` runs the enclosed expression as real arithmetic, so positions and sizes can be computed instead of hand-calculated: `eval(($width-100)/2)` centers a 100px-wide element. Division is automatically treated as integer (floor) division since pixel coordinates can't be fractional; if a formula still produces a float (e.g. from a scaling ratio) the result is rounded to the nearest pixel rather than truncated.
 - **Font/size sanity check** — every widget with both a `font` and a `size` is checked against a minimum-line-height heuristic; a `size` too short for its `font` produces a warning identifying the screen, widget, font variable, and both values, catching text that would otherwise render clipped on the actual device:
   ```

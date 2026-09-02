@@ -242,6 +242,7 @@ class XMLInclude:
         self.globals = {}
         self.layouts = []
         self.colors = {}
+        self.defaults = {}
         self.current_screen = "?"
         self.current_file = ""
         self.last_font_var = None
@@ -394,6 +395,24 @@ class XMLInclude:
             if n.children:
                 self.scanColors(n.children)
 
+    def scanDefaults(self, node):
+        """Pre-scans an about-to-be-included file's own tree for <default
+        tag=... .../> declarations, feeding self.defaults - same timing
+        and rationale as scanColors() above. Every attribute on a
+        <default> other than "tag" itself is a default value for that
+        tag; a later declaration for the same tag+attr overrides an
+        earlier one (last-scanned wins), the same as any other $var/color
+        redeclaration in this toolset."""
+        nodes = node if isinstance(node, list) else [node]
+        for n in nodes:
+            if isinstance(n, Comment):
+                continue
+            if n.tag == "default" and "tag" in n.attrs:
+                target = self.defaults.setdefault(n.attrs["tag"], {})
+                target.update({k: v for k, v in n.attrs.items() if k != "tag"})
+            if n.children:
+                self.scanDefaults(n.children)
+
     def offsetPositions(self, node, pos):
         """Applies a position=(x,y) offset to every element anywhere in
         this subtree that has its own position= attribute - not just
@@ -425,7 +444,9 @@ class XMLInclude:
             print(f"==> processApplet: >{level}, {inc_file}")
             return RawText(readFile(inc_file))
 
-        self.scanColors(XmlParser(readFile(inc_file)).parseDocument())
+        inc_doc = XmlParser(readFile(inc_file)).parseDocument()
+        self.scanColors(inc_doc)
+        self.scanDefaults(inc_doc)
 
         resolved_attrs = {}
         for key, value in attrs.items():
@@ -471,6 +492,12 @@ class XMLInclude:
             self.globals["$" + node.attrs["name"]] = self.resolveValue(node.attrs["value"])
             return None
 
+        if node.tag == "default":
+            # Already picked up by scanDefaults() before this file's
+            # elements were processed - a <default> is build-time only,
+            # like <global>, and never appears in the compiled output.
+            return None
+
         if node.tag == "screen":
             if "size" in node.attrs:
                 w, h = self.resolveValue(node.attrs["size"]).split(",")
@@ -494,6 +521,12 @@ class XMLInclude:
 
         new_attrs = {}
         for key, value in node.attrs.items():
+            value = self.resolveValue(value)
+            self.checkColor(key, value)
+            new_attrs[key] = value
+        for key, value in self.defaults.get(node.tag, {}).items():
+            if key in new_attrs:
+                continue
             value = self.resolveValue(value)
             self.checkColor(key, value)
             new_attrs[key] = value
