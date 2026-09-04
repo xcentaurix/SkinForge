@@ -81,11 +81,37 @@ def xmlUnescape(text):
     return text
 
 
+class XmlParseError(ValueError):
+    """A parse failure with enough context (line/column, a snippet of the
+    offending line, a caret under the exact position) to find and fix the
+    spot directly - mirrors xmlinc.py's own XmlParseError, see that
+    module for the rationale."""
+
+
 class XmlParser():
     def __init__(self, text):
         self.text = text
         self.pos = 0
         self.n = len(text)
+
+    def fail(self, pos, msg):
+        """Raises XmlParseError with a 1-based line/column and a
+        single-line snippet of that line with a caret under the exact
+        column. The file name itself isn't known here (this class only
+        ever sees raw text) - callers that do know it are expected to
+        catch and re-raise with that added, same as xmlinc.py's."""
+        line = self.text.count("\n", 0, pos) + 1
+        line_start = self.text.rfind("\n", 0, pos) + 1
+        line_end = self.text.find("\n", pos)
+        if line_end == -1:
+            line_end = len(self.text)
+        snippet = self.text[line_start:line_end]
+        col = pos - line_start + 1
+        caret = " " * (col - 1) + "^"
+        raise XmlParseError(f"{msg} (line {line}, column {col}):\n{snippet}\n{caret}")
+
+    def charAt(self, pos):
+        return self.text[pos] if pos < self.n else None
 
     def skipSpace(self):
         while self.pos < self.n and self.text[self.pos].isspace():
@@ -104,14 +130,19 @@ class XmlParser():
         is real, silent data loss for any such file."""
         self.skipSpace()
         if self.text.startswith("<?", self.pos):
-            self.pos = self.text.index("?>", self.pos) + 2
+            end = self.text.find("?>", self.pos)
+            if end == -1:
+                self.fail(self.pos, "unterminated XML declaration, expected a closing '?>'")
+            self.pos = end + 2
         self.skipSpace()
         elements = []
         pending_comment = None
         while self.pos < self.n:
             if self.text.startswith("<!--", self.pos):
                 start = self.pos + 4
-                end = self.text.index("-->", start)
+                end = self.text.find("-->", start)
+                if end == -1:
+                    self.fail(self.pos, "unterminated comment, expected a closing '-->'")
                 pending_comment = self.text[start:end].strip()
                 self.pos = end + 3
                 self.skipSpace()
@@ -126,29 +157,43 @@ class XmlParser():
         return elements
 
     def skipComment(self):
-        self.pos = self.text.index("-->", self.pos) + 3
+        end = self.text.find("-->", self.pos)
+        if end == -1:
+            self.fail(self.pos, "unterminated comment, expected a closing '-->'")
+        self.pos = end + 3
 
     def parseName(self):
         start = self.pos
         while self.pos < self.n and (self.text[self.pos].isalnum() or self.text[self.pos] in "_:.-"):
             self.pos += 1
+        if self.pos == start:
+            self.fail(self.pos, f"expected a tag/attribute name, found {self.charAt(self.pos)!r}")
         return self.text[start:self.pos]
 
     def parseAttrValue(self):
-        quote = self.text[self.pos]
+        quote = self.charAt(self.pos)
+        if quote not in ('"', "'"):
+            self.fail(self.pos, f"expected an attribute value starting with a quote, found {quote!r}")
+        start = self.pos
         self.pos += 1
-        end = self.text.index(quote, self.pos)
+        end = self.text.find(quote, self.pos)
+        if end == -1:
+            self.fail(start, f"unterminated attribute value, expected a closing {quote!r}")
         value = self.text[self.pos:end]
         self.pos = end + 1
         return xmlUnescape(value)
 
     def parseElement(self):
-        assert self.text[self.pos] == "<"
+        if self.charAt(self.pos) != "<":
+            self.fail(self.pos, f"expected '<' to start an element, found {self.charAt(self.pos)!r}")
+        start = self.pos
         self.pos += 1
         tag = self.parseName()
         attrs = {}
         while True:
             self.skipSpace()
+            if self.pos >= self.n:
+                self.fail(start, f"unterminated start tag <{tag}>, ran off the end of the file")
             if self.text.startswith("/>", self.pos):
                 self.pos += 2
                 return tag, attrs, None, None
@@ -157,16 +202,20 @@ class XmlParser():
                 break
             name = self.parseName()
             self.skipSpace()
-            assert self.text[self.pos] == "="
+            if self.charAt(self.pos) != "=":
+                self.fail(self.pos, f"expected '=' after attribute {name!r} of <{tag}>, found {self.charAt(self.pos)!r}")
             self.pos += 1
             self.skipSpace()
             attrs[name] = self.parseAttrValue()
 
         children, text = self.parseContent()
+        end_tag_pos = self.pos
         end_tag = self.parseName()
-        assert end_tag == tag, f"mismatched close tag: <{tag}> ... </{end_tag}>"
+        if end_tag != tag:
+            self.fail(end_tag_pos, f"mismatched close tag: <{tag}> ... </{end_tag}>")
         self.skipSpace()
-        assert self.text[self.pos] == ">"
+        if self.charAt(self.pos) != ">":
+            self.fail(self.pos, f"expected '>' to close </{tag}>, found {self.charAt(self.pos)!r}")
         self.pos += 1
         return tag, attrs, children, text
 
@@ -175,12 +224,16 @@ class XmlParser():
         pending_comment = None
         text_parts = []
         while True:
+            if self.pos >= self.n:
+                self.fail(self.pos, "unexpected end of file while looking for a closing tag")
             if self.text.startswith("</", self.pos):
                 self.pos += 2
                 break
             if self.text.startswith("<!--", self.pos):
                 start = self.pos + 4
-                end = self.text.index("-->", start)
+                end = self.text.find("-->", start)
+                if end == -1:
+                    self.fail(self.pos, "unterminated comment, expected a closing '-->'")
                 pending_comment = self.text[start:end].strip()
                 self.pos = end + 3
                 continue
@@ -189,7 +242,9 @@ class XmlParser():
                 children.append(Commented(node, pending_comment))
                 pending_comment = None
                 continue
-            next_lt = self.text.index("<", self.pos)
+            next_lt = self.text.find("<", self.pos)
+            if next_lt == -1:
+                self.fail(self.pos, "unexpected end of file while looking for a closing tag")
             text_parts.append(self.text[self.pos:next_lt])
             self.pos = next_lt
 
@@ -385,9 +440,13 @@ def resolveFontIndex(fonts, index):
     return f"{family};{size}"
 
 
-def mergeRect(kwargs):
+def posSizeFields(kwargs):
+    """Returns {"position": "x,y", "size": "w,h"} from a MultiContentEntry*
+    call's pos=/size= kwargs - same "x,y" string convention position=/size=
+    use on every other widget in this codebase, rather than a domain-only
+    [x, y, w, h] array shape."""
     pos, size = kwargs["pos"], kwargs["size"]
-    return [pos[0], pos[1], size[0], size[1]]
+    return {"position": f"{pos[0]},{pos[1]}", "size": f"{size[0]},{size[1]}"}
 
 
 def toDomainField(entry, fonts):
@@ -408,7 +467,7 @@ def toDomainField(entry, fonts):
         # still falls back to raw, same as before.
         font = resolveFontIndex(fonts, kwargs["font"]) if "font" in kwargs else None
         if "font" not in kwargs or font is not None:
-            field = {"rect": mergeRect(kwargs)}
+            field = posSizeFields(kwargs)
             if font is not None:
                 field["font"] = font
             field["flags"] = kwargs["flags"]
@@ -420,7 +479,7 @@ def toDomainField(entry, fonts):
 
     if (not has_args and call in ICON_CALLS
             and ICON_REQUIRED_KWARGS <= keys <= ICON_ALLOWED_KWARGS):
-        field = {"rect": mergeRect(kwargs), "flags": kwargs["flags"], "value": kwargs["png"]}
+        field = {**posSizeFields(kwargs), "flags": kwargs["flags"], "value": kwargs["png"]}
         variant = ICON_CALLS[call]
         if variant:
             field["variant"] = variant
@@ -430,7 +489,7 @@ def toDomainField(entry, fonts):
 
     if (not has_args and call == "MultiContentEntryProgress"
             and PROGRESS_REQUIRED_KWARGS <= keys <= PROGRESS_ALLOWED_KWARGS):
-        field = {"rect": mergeRect(kwargs), "value": kwargs["percent"]}
+        field = {**posSizeFields(kwargs), "value": kwargs["percent"]}
         for k in ("borderWidth", "foreColor", "foreColorSelected", "backColor"):
             if k in kwargs:
                 field[k] = kwargs[k]
@@ -784,7 +843,11 @@ def main(argv):
         print(f"ERROR: source file not found: {args.srcinfile}")
         sys.exit(1)
 
-    output = xml2yml(readFile(args.srcinfile))
+    try:
+        output = xml2yml(readFile(args.srcinfile))
+    except XmlParseError as e:
+        print(f"ERROR: {args.srcinfile}: {e}")
+        sys.exit(1)
     writeFile(srcoutfile, output)
 
     # print("xml2yml done.")

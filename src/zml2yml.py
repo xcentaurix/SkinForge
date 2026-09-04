@@ -23,15 +23,21 @@
 # what you declare is what you'll see used below it. The $/quotes are
 # optional (plain "var: i" still works) so existing files aren't broken.
 #
-# expands (range is inclusive) into six copies of body, spliced in place
-# of the single "for" list item at the same indentation, with every
-# occurrence of $i in each copy replaced by that iteration's value as
-# plain text - the same "$var embeds in a literal" convention xmlinc
-# itself uses (e.g. "list$i"), so nothing downstream needs to know a
-# loop produced the result. Nesting works: an inner "for" inside a
-# "body" is left untouched during the outer loop's own pass (its lines
-# are just copied and $-substituted like any other body line) and gets
-# expanded on the next pass over the whole file.
+# A loop iterates over either "range: [start, end]" (inclusive, numeric)
+# or "values: [a, b, c]" (a literal list, iterated in order, duplicates
+# allowed) - exactly one of the two, never both. Values may be quoted
+# ("text1") or bare (text1); quotes are stripped, same as "var".
+#
+# expands into one copy of body per iteration, spliced in place of the
+# single "for" list item at the same indentation, with every occurrence
+# of $i in each copy replaced by that iteration's value (the range
+# number, or the literal value text) as plain text - the same "$var
+# embeds in a literal" convention xmlinc itself uses (e.g. "list$i"), so
+# nothing downstream needs to know a loop produced the result. Nesting
+# works: an inner "for" inside a "body" is left untouched during the
+# outer loop's own pass (its lines are just copied and $-substituted
+# like any other body line) and gets expanded on the next pass over the
+# whole file.
 #
 # A malformed "for" item (missing var/range/body) is left in the output
 # untouched rather than silently dropped, so a typo fails loudly further
@@ -62,12 +68,27 @@ from FileUtils import readFile, writeFile
 FOR_ITEM_RE = re.compile(r'^(?P<indent>[ \t]*)-\s+for:\s*$')
 VAR_LINE_RE = re.compile(r'^[ \t]+var:\s*"?\$?(\w+)"?\s*$')
 RANGE_LINE_RE = re.compile(r'^[ \t]+range:\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]\s*$')
+VALUES_LINE_RE = re.compile(r'^[ \t]+values:\s*\[(?P<items>.*)\]\s*$')
 BODY_LINE_RE = re.compile(r'^[ \t]+body:\s*$')
 FILE_REF_RE = re.compile(r'(file:\s*"[^"]*)\.zmlinc(")')
 
 
 def indentLen(line):
     return len(line) - len(line.lstrip(" \t"))
+
+
+def parseValuesList(itemsText):
+    """Splits a "values: [a, "b", c]" payload into ["a", "b", "c"],
+    stripping surrounding quotes per item (same convention as "var")."""
+    values = []
+    for part in itemsText.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if len(part) >= 2 and part[0] == part[-1] and part[0] in "'\"":
+            part = part[1:-1]
+        values.append(part)
+    return values
 
 
 def expandOnce(text):
@@ -89,6 +110,7 @@ def expandOnce(text):
         item_indent = m.group("indent")
         var_name = None
         var_range = None
+        var_values = None
         body_lines = []
         in_body = False
         j = i + 1
@@ -104,11 +126,14 @@ def expandOnce(text):
             if not in_body:
                 mv = VAR_LINE_RE.match(raw)
                 mr = RANGE_LINE_RE.match(raw)
+                mvals = VALUES_LINE_RE.match(raw)
                 mb = BODY_LINE_RE.match(raw)
                 if mv:
                     var_name = mv.group(1)
                 elif mr:
                     var_range = (int(mr.group(1)), int(mr.group(2)))
+                elif mvals:
+                    var_values = parseValuesList(mvals.group("items"))
                 elif mb:
                     in_body = True
                 j += 1
@@ -116,7 +141,7 @@ def expandOnce(text):
             body_lines.append(raw)
             j += 1
 
-        if var_name is None or var_range is None or not body_lines:
+        if var_name is None or not body_lines or (var_range is None and not var_values):
             out.append(lines[i])
             i += 1
             continue
@@ -126,14 +151,19 @@ def expandOnce(text):
         shift = indentLen(first_content) - len(item_indent)
         var_re = re.compile(r'\$' + re.escape(var_name) + r'(?![A-Za-z0-9_])')
 
-        start, end = var_range
-        for value in range(start, end + 1):
+        if var_values is not None:
+            iter_values = var_values
+        else:
+            start, end = var_range
+            iter_values = [str(v) for v in range(start, end + 1)]
+
+        for value in iter_values:
             for bl in body_lines:
                 if bl.strip() == "":
                     out.append("")
                     continue
                 dedented = bl[shift:] if 0 < shift <= len(bl) else bl
-                out.append(var_re.sub(str(value), dedented))
+                out.append(var_re.sub(lambda _m: value, dedented))
 
         i = j
 

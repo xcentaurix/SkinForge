@@ -398,6 +398,23 @@ def unwrap(item):
     return item.value if isinstance(item, Commented) else item
 
 
+VAR_BINDING_RE = re.compile(r"^(\w+)\s*(?::=|=)\s*(.*)$")
+
+
+def parseVarBinding(v):
+    """A cell.vars entry accepts either "name := expr" (matching the real
+    walrus operator the compiled Python needs) or the more natural-looking
+    "name = expr" - :=  is tried first so it always wins over the plain-=
+    alternative when both would otherwise match. Always emitted back out as
+    := (renderConvertTemplate below), since that's the only valid syntax
+    inside the "var": (...) tuple literal itself - a bare = there would be
+    a real Python SyntaxError, not just a style choice."""
+    m = VAR_BINDING_RE.match(v)
+    if not m:
+        raise ValueError(f"cell.vars entry isn't a \"name := expr\" or \"name = expr\" binding: {v!r}")
+    return m.group(1), m.group(2)
+
+
 def renderConvertTemplate(body):
     # Real nested indentation (matching hand-written templates like
     # TVMagazineCockpit's screenpart_EventCell), not a flat block where the
@@ -409,7 +426,7 @@ def renderConvertTemplate(body):
     if "var" in body:
         lines.append(f'{INDENT}"var": (')
         for v in body["var"]:
-            name, _, expr = v.partition(" := ")
+            name, expr = parseVarBinding(v)
             lines.append(f"{INDENT * 2}{name} := {expr},")
         lines.append(f"{INDENT}),")
     lines.append(f'{INDENT}"template": [')
@@ -448,8 +465,27 @@ def unwrapField(item):
     return kind, field
 
 
-def rectToPosSize(rect):
-    return [rect[0], rect[1]], [rect[2], rect[3]]
+def toIntOrExpr(s):
+    """A pos=/size= element is either a plain int or (TemplatedMultiContentEx
+    grid math / a cell.vars-bound name, e.g. "hspace//2") a raw Python
+    expression - same distinction pyVal(v, raw=True) already renders
+    (plain repr vs. verbatim text), so parse the same way in reverse:
+    only actual integers become one, everything else stays the literal
+    expression string."""
+    try:
+        return int(s)
+    except ValueError:
+        return s
+
+
+def parsePosSize(field):
+    """Inverse of xml2yml.py's posSizeFields(): "x,y"/"w,h" strings back to
+    the [x, y]/[w, h] list shape MultiContentEntry*'s pos=/size= kwargs
+    need."""
+    def pair(s):
+        a, b = s.split(",")
+        return [toIntOrExpr(a), toIntOrExpr(b)]
+    return pair(field["position"]), pair(field["size"])
 
 
 def fontKey(font_val):
@@ -555,7 +591,7 @@ def fromDomainField(kind, field, font_index):
             field = {**field, "kwargs": {**kwargs, "font": font_index[fontKey(font_val)]}}
         return field
 
-    pos, size = rectToPosSize(field["rect"])
+    pos, size = parsePosSize(field)
 
     if kind == "text":
         kwargs = {"pos": pos, "size": size}

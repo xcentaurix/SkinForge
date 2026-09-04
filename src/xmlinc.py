@@ -62,6 +62,7 @@ KNOWN_BASE_COLORS = {
 }
 
 VAR_RE = re.compile(r"\$\w+")
+DEFAULT_TAG_SELECTOR_RE = re.compile(r"^(?P<tag>\w+)(?:\[render=(?P<render>[^\]]+)\])?$")
 
 
 # ---------------------------------------------------------------------------
@@ -104,11 +105,38 @@ class Element:
         self.text = text            # str, or None (mutually exclusive with children)
 
 
+class XmlParseError(ValueError):
+    """A parse failure with enough context (line/column, a snippet of the
+    offending line, a caret under the exact position) to find and fix the
+    spot directly, instead of the bare AssertionError this used to raise -
+    the position alone was useless without re-deriving line/column and
+    re-opening the file by hand."""
+
+
 class XmlParser:
     def __init__(self, text):
         self.text = text
         self.pos = 0
         self.n = len(text)
+
+    def fail(self, pos, msg):
+        """Raises XmlParseError with a 1-based line/column and a
+        single-line snippet of that line with a caret under the exact
+        column - the file name itself isn't known here (this class only
+        ever sees raw text), so callers that do know it (processInclude/
+        processFile) are expected to catch and re-raise with that added."""
+        line = self.text.count("\n", 0, pos) + 1
+        line_start = self.text.rfind("\n", 0, pos) + 1
+        line_end = self.text.find("\n", pos)
+        if line_end == -1:
+            line_end = len(self.text)
+        snippet = self.text[line_start:line_end]
+        col = pos - line_start + 1
+        caret = " " * (col - 1) + "^"
+        raise XmlParseError(f"{msg} (line {line}, column {col}):\n{snippet}\n{caret}")
+
+    def charAt(self, pos):
+        return self.text[pos] if pos < self.n else None
 
     def skipSpace(self):
         while self.pos < self.n and self.text[self.pos].isspace():
@@ -117,7 +145,10 @@ class XmlParser:
     def parseDocument(self):
         self.skipSpace()
         if self.text.startswith("<?", self.pos):
-            self.pos = self.text.index("?>", self.pos) + 2
+            end = self.text.find("?>", self.pos)
+            if end == -1:
+                self.fail(self.pos, "unterminated XML declaration, expected a closing '?>'")
+            self.pos = end + 2
             self.skipSpace()
         nodes = []
         while self.pos < self.n:
@@ -135,7 +166,9 @@ class XmlParser:
 
     def parseComment(self):
         start = self.pos + 4
-        end = self.text.index("-->", start)
+        end = self.text.find("-->", start)
+        if end == -1:
+            self.fail(self.pos, "unterminated comment, expected a closing '-->'")
         comment = Comment(self.text[start:end].strip())
         self.pos = end + 3
         return comment
@@ -144,23 +177,34 @@ class XmlParser:
         start = self.pos
         while self.pos < self.n and (self.text[self.pos].isalnum() or self.text[self.pos] in "_:.-"):
             self.pos += 1
+        if self.pos == start:
+            self.fail(self.pos, f"expected a tag/attribute name, found {self.charAt(self.pos)!r}")
         return self.text[start:self.pos]
 
     def parseAttrValue(self):
-        quote = self.text[self.pos]
+        quote = self.charAt(self.pos)
+        if quote not in ('"', "'"):
+            self.fail(self.pos, f"expected an attribute value starting with a quote, found {quote!r}")
+        start = self.pos
         self.pos += 1
-        end = self.text.index(quote, self.pos)
+        end = self.text.find(quote, self.pos)
+        if end == -1:
+            self.fail(start, f"unterminated attribute value, expected a closing {quote!r}")
         value = self.text[self.pos:end]
         self.pos = end + 1
         return value
 
     def parseElement(self):
-        assert self.text[self.pos] == "<"
+        if self.charAt(self.pos) != "<":
+            self.fail(self.pos, f"expected '<' to start an element, found {self.charAt(self.pos)!r}")
+        start = self.pos
         self.pos += 1
         tag = self.parseName()
         attrs = {}
         while True:
             self.skipSpace()
+            if self.pos >= self.n:
+                self.fail(start, f"unterminated start tag <{tag}>, ran off the end of the file")
             if self.text.startswith("/>", self.pos):
                 self.pos += 2
                 return Element(tag, attrs, None, None)
@@ -169,18 +213,23 @@ class XmlParser:
                 break
             name = self.parseName()
             self.skipSpace()
-            assert self.text[self.pos] == "="
+            if self.charAt(self.pos) != "=":
+                self.fail(self.pos, f"expected '=' after attribute {name!r} of <{tag}>, found {self.charAt(self.pos)!r}")
             self.pos += 1
             self.skipSpace()
             attrs[name] = self.parseAttrValue()
 
         children, text = self.parseContent()
-        assert self.text.startswith("</", self.pos), f"unclosed tag: <{tag}>"
+        if not self.text.startswith("</", self.pos):
+            self.fail(start, f"unclosed tag <{tag}>, expected a matching </{tag}>")
         self.pos += 2
+        end_tag_pos = self.pos
         end_tag = self.parseName()
-        assert end_tag == tag, f"mismatched close tag: <{tag}> ... </{end_tag}>"
+        if end_tag != tag:
+            self.fail(end_tag_pos, f"mismatched close tag: <{tag}> ... </{end_tag}>")
         self.skipSpace()
-        assert self.text[self.pos] == ">"
+        if self.charAt(self.pos) != ">":
+            self.fail(self.pos, f"expected '>' to close </{tag}>, found {self.charAt(self.pos)!r}")
         self.pos += 1
         return Element(tag, attrs, children, text)
 
@@ -188,6 +237,8 @@ class XmlParser:
         children = []
         text_parts = []
         while True:
+            if self.pos >= self.n:
+                self.fail(self.pos, "unexpected end of file while looking for a closing tag")
             if self.text.startswith("</", self.pos):
                 break
             if self.text.startswith("<!--", self.pos):
@@ -196,7 +247,9 @@ class XmlParser:
             if self.text[self.pos] == "<":
                 children.append(self.parseElement())
                 continue
-            next_lt = self.text.index("<", self.pos)
+            next_lt = self.text.find("<", self.pos)
+            if next_lt == -1:
+                self.fail(self.pos, "unexpected end of file while looking for a closing tag")
             text_parts.append(self.text[self.pos:next_lt])
             self.pos = next_lt
         if children:
@@ -402,13 +455,25 @@ class XMLInclude:
         <default> other than "tag" itself is a default value for that
         tag; a later declaration for the same tag+attr overrides an
         earlier one (last-scanned wins), the same as any other $var/color
-        redeclaration in this toolset."""
+        redeclaration in this toolset.
+
+        "tag" may optionally narrow the match to one render variant of
+        that tag, e.g. tag="widget[render=Label]" - self.defaults is then
+        keyed self.defaults[base_tag][render_value], with the unqualified
+        tag="widget" form stored under the "*" key (matches any render,
+        and any element with no render attribute at all). A malformed
+        selector (anything not matching DEFAULT_TAG_SELECTOR_RE) is
+        stored verbatim as its own base tag under "*", same as before -
+        it just won't match any real element, rather than crashing."""
         nodes = node if isinstance(node, list) else [node]
         for n in nodes:
             if isinstance(n, Comment):
                 continue
             if n.tag == "default" and "tag" in n.attrs:
-                target = self.defaults.setdefault(n.attrs["tag"], {})
+                m = DEFAULT_TAG_SELECTOR_RE.match(n.attrs["tag"])
+                base_tag = m.group("tag") if m else n.attrs["tag"]
+                render_value = m.group("render") if m else None
+                target = self.defaults.setdefault(base_tag, {}).setdefault(render_value or "*", {})
                 target.update({k: v for k, v in n.attrs.items() if k != "tag"})
             if n.children:
                 self.scanDefaults(n.children)
@@ -428,6 +493,40 @@ class XMLInclude:
             if n.children:
                 self.offsetPositions(n.children, pos)
 
+    def computeBoundingBox(self, node):
+        """Returns (max_x, max_y) - the furthest right/bottom edge among
+        every element anywhere in this subtree that has both a plain
+        numeric position= and size= (arbitrarily deep, same reach as
+        offsetPositions) - or None if nothing measurable was found. A
+        "fill"/"center,center" position or a non-numeric size (e.g. still
+        containing an unresolved eval()/$var, which shouldn't happen by
+        the time this runs but is defensive) is skipped rather than
+        guessed at, so a stray unmeasurable widget just doesn't
+        contribute instead of poisoning the whole result with a bogus
+        number."""
+        nodes = node if isinstance(node, list) else [node]
+        max_x = max_y = None
+        for n in nodes:
+            if not isinstance(n, Element):
+                continue
+            pos_attr = n.attrs.get("position")
+            size_attr = n.attrs.get("size")
+            if pos_attr and size_attr and pos_attr != "fill":
+                try:
+                    x, y = (int(v) for v in pos_attr.split(","))
+                    w, h = (int(v) for v in size_attr.split(","))
+                    max_x = x + w if max_x is None else max(max_x, x + w)
+                    max_y = y + h if max_y is None else max(max_y, y + h)
+                except ValueError:
+                    pass
+            if n.children:
+                child_box = self.computeBoundingBox(n.children)
+                if child_box:
+                    cx, cy = child_box
+                    max_x = cx if max_x is None else max(max_x, cx)
+                    max_y = cy if max_y is None else max(max_y, cy)
+        return None if max_x is None else (max_x, max_y)
+
     def processInclude(self, level, node, pos):
         """Resolves one <xmlinc> element: locates the file, registers its
         other attributes as $vars, recurses into it (or splices it in
@@ -435,16 +534,16 @@ class XMLInclude:
         replacement node(s) to substitute in its place."""
         attrs = node.attrs
         inc_filename = self.resolveValue(attrs["file"])
-        pos2 = pos
-        if "position" in attrs:
-            pos2 = pos + Pos(self.resolveValue(attrs["position"]))
         inc_file = self.getIncFilePath(inc_filename)
 
         if os.path.basename(inc_file).startswith("applet_"):
             print(f"==> processApplet: >{level}, {inc_file}")
             return RawText(readFile(inc_file))
 
-        inc_doc = XmlParser(readFile(inc_file)).parseDocument()
+        try:
+            inc_doc = XmlParser(readFile(inc_file)).parseDocument()
+        except XmlParseError as e:
+            raise XmlParseError(f"{inc_file}: {e}") from None
         self.scanColors(inc_doc)
         self.scanDefaults(inc_doc)
 
@@ -462,6 +561,34 @@ class XMLInclude:
         self.checkFonts(resolved_attrs)
 
         result = self.processFile(level + 1, inc_file)
+
+        # Auto-expose the included content's own intrinsic bounding box as
+        # $child_width/$child_height, so a parent can size/position things
+        # around an include without hand-maintaining the number (see
+        # README's "Relative positioning" section). Measured against the
+        # file's own local 0,0-based coordinates - this is meant to be a
+        # stable property of the fragment itself ("how big is this
+        # content"), not wherever a particular include happens to place
+        # it. Fixed name, not per-file: simpler to use, but it means each
+        # xmlinc overwrites the previous one's value - only ever reliable
+        # for the include that was just processed, not an earlier sibling.
+        box = self.computeBoundingBox(result) if result is not None else None
+        if box:
+            self.globals["$child_width"] = str(box[0])
+            self.globals["$child_height"] = str(box[1])
+
+        # position= is resolved only now - after the file above has been
+        # fully processed and its own $child_width/$child_height set - so
+        # an <xmlinc> can reference its own just-measured size to
+        # center/place itself, e.g.
+        # position="eval(($screen_width-$child_width)/2),0". Resolving it
+        # any earlier (as this used to, before the file was even read)
+        # would only ever see whatever the *previous* include left
+        # behind, never this one's own size.
+        pos2 = pos
+        if "position" in attrs:
+            pos2 = pos + Pos(self.resolveValue(attrs["position"]))
+
         if isinstance(result, list):
             for r in result:
                 if isinstance(r, Element):
@@ -524,12 +651,20 @@ class XMLInclude:
             value = self.resolveValue(value)
             self.checkColor(key, value)
             new_attrs[key] = value
-        for key, value in self.defaults.get(node.tag, {}).items():
-            if key in new_attrs:
-                continue
-            value = self.resolveValue(value)
-            self.checkColor(key, value)
-            new_attrs[key] = value
+        tag_defaults = self.defaults.get(node.tag, {})
+        render_value = new_attrs.get("render")
+        default_dicts = []
+        if render_value is not None and render_value in tag_defaults:
+            default_dicts.append(tag_defaults[render_value])
+        if "*" in tag_defaults:
+            default_dicts.append(tag_defaults["*"])
+        for defaults in default_dicts:
+            for key, value in defaults.items():
+                if key in new_attrs:
+                    continue
+                value = self.resolveValue(value)
+                self.checkColor(key, value)
+                new_attrs[key] = value
         if "Summary" not in self.current_file:
             self.checkFonts(new_attrs)
 
@@ -557,7 +692,10 @@ class XMLInclude:
         prev_file = self.current_file
         self.current_file = afile
         try:
-            doc = XmlParser(readFile(afile)).parseDocument()
+            try:
+                doc = XmlParser(readFile(afile)).parseDocument()
+            except XmlParseError as e:
+                raise XmlParseError(f"{afile}: {e}") from None
             nodes = doc if isinstance(doc, list) else [doc]
             results = []
             for n in nodes:

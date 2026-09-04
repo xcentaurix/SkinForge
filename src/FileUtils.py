@@ -1,6 +1,7 @@
 import os
 import shlex
 import glob
+import subprocess
 
 
 def readFile(path):
@@ -37,7 +38,7 @@ def touchFile(path):
 
 
 def copyFile(src_path, dest_path):
-    os.popen(f"cp {shlex.quote(src_path)} {shlex.quote(dest_path)}").read()
+    subprocess.run(["cp", src_path, dest_path], check=True)
 
 
 def copyFiles(src_path, dest_path):
@@ -55,7 +56,7 @@ def renameFile(src_path, dest_path):
 
 
 def createDirectory(path):
-    os.popen(f"mkdir -p {shlex.quote(path)}").read()
+    subprocess.run(["mkdir", "-p", path], check=True)
 
 
 def createSymlink(src, dst):
