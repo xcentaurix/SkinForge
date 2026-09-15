@@ -15,8 +15,14 @@ def readFile(path):
 
 
 def writeFile(path, data):
+    # newline="" disables Python's own newline translation - without it,
+    # writing on Windows turns every "\n" already in data (readFile() above
+    # already normalizes any source line ending to "\n" on read, same as
+    # every string literal in this codebase) into "\r\n" on disk, fighting
+    # the repo's own .gitattributes "* text=auto eol=lf" rule and leaving
+    # every file this writes CRLF until the next git add renormalizes it.
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(data)
     except Exception as e:
         print(f"path: {path}, exception: {e}")

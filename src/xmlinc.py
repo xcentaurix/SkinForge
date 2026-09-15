@@ -626,8 +626,20 @@ class XMLInclude:
             return None
 
         if node.tag == "screen":
-            if "size" in node.attrs:
-                w, h = self.resolveValue(node.attrs["size"]).split(",")
+            # resolution= is the "designed for" fallback enigma2 itself
+            # uses for scaling (see skin.py's parseScreen) when a screen
+            # has no explicit size= - same fallback xml2svg.py's
+            # size_attr lookup already applies. This only feeds
+            # $screen_width/$screen_height below; it never writes a size=
+            # onto the compiled <screen> element itself; a screen whose
+            # position= isn't "fill" still needs a real size= in its own
+            # source (or position="fill" instead) - enigma2's own
+            # collectAttributes()/context.parse() (skin.py) requires an
+            # actual size= there, and papering over a missing one here
+            # would just hide that source error instead of surfacing it.
+            size_attr = node.attrs.get("size") or node.attrs.get("resolution")
+            if size_attr:
+                w, h = self.resolveValue(size_attr).split(",")
                 self.globals["$screen_width"] = w
                 self.globals["$screen_height"] = h
             self.current_screen = node.attrs.get("name", "?")
@@ -651,21 +663,21 @@ class XMLInclude:
             value = self.resolveValue(value)
             self.checkColor(key, value)
             new_attrs[key] = value
-        tag_defaults = self.defaults.get(node.tag, {})
-        render_value = new_attrs.get("render")
-        default_dicts = []
-        if render_value is not None and render_value in tag_defaults:
-            default_dicts.append(tag_defaults[render_value])
-        if "*" in tag_defaults:
-            default_dicts.append(tag_defaults["*"])
-        for defaults in default_dicts:
-            for key, value in defaults.items():
-                if key in new_attrs:
-                    continue
-                value = self.resolveValue(value)
-                self.checkColor(key, value)
-                new_attrs[key] = value
         if "Summary" not in self.current_file:
+            tag_defaults = self.defaults.get(node.tag, {})
+            render_value = new_attrs.get("render")
+            default_dicts = []
+            if render_value is not None and render_value in tag_defaults:
+                default_dicts.append(tag_defaults[render_value])
+            if "*" in tag_defaults:
+                default_dicts.append(tag_defaults["*"])
+            for defaults in default_dicts:
+                for key, value in defaults.items():
+                    if key in new_attrs:
+                        continue
+                    value = self.resolveValue(value)
+                    self.checkColor(key, value)
+                    new_attrs[key] = value
             self.checkFonts(new_attrs)
 
         new_children = None

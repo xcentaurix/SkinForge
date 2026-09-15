@@ -1,14 +1,16 @@
 #!/bin/bash
-domain=$(getdomain "$1")
+. "$(dirname "$0")/common"
+
+domain=$("$(dirname "$0")/getdomain" "$1")
 if [ -z "$domain" ]; then
 	echo no valid domain specified
 	exit 1
 fi
 echo "Domain: $domain"
 
-srcbase="${2:-$HOME/git/dev}"
-dstbase="${3:-$HOME/git/rel}"
-cmnbase="${4:-$HOME/git/dev}"
+srcbase="${2:-$GIT_DEV}"
+dstbase="${3:-$GIT_REL}"
+cmnbase="${4:-$GIT_DEV}"
 srcroot=$srcbase/$domain
 dstroot=$dstbase/$domain
 srcskin=$srcroot/src/skin

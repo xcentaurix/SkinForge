@@ -1,0 +1,8 @@
+#!/bin/bash
+src="$1"
+dst="$2"
+if [ -z "$src" ] || [ -z "$dst" ]; then
+	echo "$0 <compiled skin.xml> <dst .svg file>"
+	exit 1
+fi
+python "$(dirname "$0")"/src/xml2svg.py -i "$src" -o "$dst"
