@@ -72,6 +72,7 @@ RAW_KWARG_KEYS = {"call", "flags", "direction"}
 INDENT = "\t"
 BARE_VAR_RE = re.compile(r"^\$\w+$")
 FORMULA_OP_RE = re.compile(r"[+\-*/]")
+IMAGE_FILE_RE = re.compile(r"\.(?:png|svg|jpg)$", re.IGNORECASE)
 
 YAML_ESCAPES = {"\\": "\\", '"': '"', "n": "\n", "t": "\t", "r": "\r"}
 
@@ -317,12 +318,16 @@ def wrapEval(value):
     with no arithmetic at all (e.g. name="picon$index", a plain per-cell
     substitution real skins use - see this module's docstring) all pass
     through untouched. Every real eval() in this codebase does contain an
-    operator; nothing here is guessed without that evidence."""
+    operator; nothing here is guessed without that evidence.
+
+    A segment ending in an image extension is a file path (e.g.
+    "IS_HD:$imagepath/icon_hd.png"), whose "/" is a directory separator,
+    not division - never a formula."""
     if not isinstance(value, str) or "$" not in value:
         return value
     segments = value.split(",")
     wrapped = [
-        seg if BARE_VAR_RE.match(seg.strip()) or "$" not in seg or not FORMULA_OP_RE.search(seg)
+        seg if BARE_VAR_RE.match(seg.strip()) or "$" not in seg or not FORMULA_OP_RE.search(seg) or IMAGE_FILE_RE.search(seg.strip())
         else f"eval({seg})"
         for seg in segments
     ]
